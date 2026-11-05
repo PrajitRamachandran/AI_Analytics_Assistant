@@ -1,0 +1,443 @@
+
+/* ==============================
+   Global Styles
+================================= */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f6fa;
+  color: #1e293b;
+}
+
+button {
+  font-family: inherit;
+}
+
+.app-container {
+  min-height: 100vh;
+  padding: 50px 24px;
+  max-width: 1150px;
+  margin: auto;
+}
+
+
+/* ==============================
+   Application Header
+================================= */
+
+.app-header {
+  margin-bottom: 35px;
+}
+
+.eyebrow {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 2px;
+}
+
+h1 {
+  color: #0f172a;
+  font-size: 34px;
+  margin: 12px 0;
+}
+
+.subtitle {
+  color: #64748b;
+  font-size: 14px;
+}
+
+
+/* ==============================
+   Upload Section
+================================= */
+
+.upload-card {
+  background: white;
+  padding: 40px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  text-align: center;
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.04);
+}
+
+.upload-icon {
+  font-size: 42px;
+}
+
+.upload-card h2 {
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+.upload-description {
+  color: #64748b;
+  font-size: 14px;
+}
+
+.file-picker {
+  display: inline-block;
+  margin-top: 20px;
+  padding: 12px 22px;
+  background: #eff6ff;
+  color: #2563eb;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.file-picker:hover {
+  background: #dbeafe;
+}
+
+.file-picker input {
+  display: none;
+}
+
+.file-hint {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.selected-file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 15px;
+  margin-top: 25px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.file-details small {
+  color: #64748b;
+}
+
+
+/* ==============================
+   Upload Button
+================================= */
+
+.upload-button {
+  display: block;
+  width: 100%;
+  margin-top: 25px;
+  padding: 14px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-size: 15px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.upload-button:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.upload-button:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+}
+
+
+/* ==============================
+   Upload Progress
+================================= */
+
+.progress-section {
+  margin-top: 25px;
+  text-align: left;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.progress-track {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #2563eb;
+  transition: width 0.2s ease;
+}
+
+
+/* ==============================
+   Success and Error Messages
+================================= */
+
+.status-message {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 8px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.status-message p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
+.status-message.success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+
+.status-message.error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+
+/* ==============================
+   Dataset History Section
+================================= */
+
+.history-section {
+  margin-top: 45px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 18px;
+}
+
+.history-header h2 {
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+.history-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.03);
+}
+
+.refresh-button {
+  padding: 10px 16px;
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #334155;
+  transition: background 0.2s;
+}
+
+.refresh-button:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.refresh-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dataset-summary {
+  margin-bottom: 18px;
+  font-size: 14px;
+  color: #475569;
+}
+
+
+/* ==============================
+   Dataset Table
+================================= */
+
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.dataset-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 14px;
+}
+
+.dataset-table th {
+  padding: 14px 12px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.dataset-table td {
+  padding: 16px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.dataset-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.dataset-table tbody tr:hover {
+  background: #fafcff;
+}
+
+.filename-cell {
+  font-weight: 600;
+  min-width: 200px;
+  overflow-wrap: anywhere;
+}
+
+
+/* ==============================
+   Dataset Status
+================================= */
+
+.status-badge {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 20px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 12px;
+  font-weight: bold;
+  text-transform: capitalize;
+}
+
+
+/* ==============================
+   Download and Delete Buttons
+================================= */
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-button,
+.delete-button {
+  padding: 8px 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s, opacity 0.2s;
+}
+
+.download-button {
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+}
+
+.download-button:hover:not(:disabled) {
+  background: #dbeafe;
+}
+
+.delete-button {
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+}
+
+.delete-button:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.download-button:disabled,
+.delete-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
+/* ==============================
+   Empty State
+================================= */
+
+.empty-message {
+  text-align: center;
+  padding: 25px;
+  color: #64748b;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 35px 15px;
+}
+
+.empty-state span {
+  font-size: 40px;
+}
+
+.empty-state h3 {
+  color: #1e293b;
+  margin-bottom: 8px;
+}
+
+.empty-state p {
+  color: #64748b;
+  font-size: 14px;
+}
+
+
+/* ==============================
+   Responsive Design
+================================= */
+
+@media (max-width: 650px) {
+  .app-container {
+    padding: 30px 15px;
+  }
+
+  .upload-card {
+    padding: 25px 18px;
+  }
+
+  h1 {
+    font-size: 27px;
+  }
+
+  .history-header {
+    align-items: flex-start;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

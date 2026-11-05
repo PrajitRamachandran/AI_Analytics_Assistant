@@ -3,12 +3,21 @@
 Only fully empty rows and columns are removed by default. Missing values are
 reported, not imputed. Duplicate rows are reported and are retained unless
 the caller explicitly enables duplicate removal.
+
+A column is only considered empty when the worksheet contains at least one
+non-empty row; a header-only (or all-blank) worksheet keeps its schema.
+Duplicates are evaluated on non-empty rows across non-empty columns, and row
+positions in reports are zero-based positions within the data rows.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
+
+import numpy as np
 import pandas as pd
+from pandas.api import types as ptypes
 
 from app.modules.data_normalization import (
     ColumnNameMapping,
@@ -81,41 +90,74 @@ class CleaningResult:
         return len(self.worksheet_errors)
 
 
-def _empty_cell_mask(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Mark null and whitespace-only string cells as empty without changing them."""
-    null_mask = dataframe.isna()
-    blank_string_mask = dataframe.apply(
-        lambda column: column.map(
-            lambda value: isinstance(value, str) and not value.strip()
-        )
+def _can_hold_strings(series: pd.Series) -> bool:
+    """Return whether a column may contain Python strings."""
+    dtype = series.dtype
+    return bool(ptypes.is_object_dtype(dtype) or ptypes.is_string_dtype(dtype))
+
+
+def _string_flags(
+    series: pd.Series,
+    predicate: Callable[[str], bool],
+) -> np.ndarray:
+    """Return a boolean array marking string cells that satisfy ``predicate``."""
+    if not _can_hold_strings(series):
+        return np.zeros(len(series), dtype=bool)
+    return np.fromiter(
+        (isinstance(value, str) and predicate(value) for value in series.tolist()),
+        dtype=bool,
+        count=len(series),
     )
-    return null_mask | blank_string_mask
+
+
+def _blank_string_flags(series: pd.Series) -> np.ndarray:
+    """Mark whitespace-only (or zero-length) string cells."""
+    return _string_flags(series, lambda value: not value.strip())
+
+
+def _empty_cell_mask(dataframe: pd.DataFrame) -> np.ndarray:
+    """Mark null and whitespace-only string cells as empty without changing them.
+
+    Returns a boolean array of shape ``(rows, columns)`` indexed by position.
+    """
+    row_count, column_count = dataframe.shape
+    mask = np.zeros((row_count, column_count), dtype=bool)
+    for position in range(column_count):
+        series = dataframe.iloc[:, position]
+        mask[:, position] = series.isna().to_numpy(dtype=bool) | _blank_string_flags(
+            series
+        )
+    return mask
 
 
 def _column_quality_report(
-    dataframe: pd.DataFrame,
+    series: pd.Series,
     column_name: str,
 ) -> ColumnQualityReport:
-    """Build conservative missingness and mixed-Python-type metadata."""
-    series = dataframe[column_name]
+    """Build conservative missingness and mixed-Python-type metadata.
+
+    Blank strings count as missing and are excluded from the mixed-type check.
+    """
     row_count = len(series)
 
-    missing_count = int(series.isna().sum())
-    blank_string_count = int(
-        series.map(lambda value: isinstance(value, str) and not value.strip()).sum()
-    )
+    null_flags = series.isna().to_numpy(dtype=bool)
+    blank_flags = _blank_string_flags(series)
+
+    missing_count = int(null_flags.sum())
+    blank_string_count = int(blank_flags.sum())
     total_missing = missing_count + blank_string_count
     missing_percentage = (
         round((total_missing / row_count) * 100, 2) if row_count else 0.0
     )
 
-    non_null_values = series[~series.isna()]
-    value_types = sorted({type(value).__name__ for value in non_null_values.tolist()})
+    value_types: List[str] = []
+    if ptypes.is_object_dtype(series.dtype):
+        present = series.to_numpy(dtype=object)[~(null_flags | blank_flags)]
+        observed = sorted({type(value).__name__ for value in present})
+        value_types = observed if len(observed) > 1 else []
 
     whitespace_padded_count = int(
-        series.map(
-            lambda value: isinstance(value, str) and value != value.strip()
-        ).sum()
+        _string_flags(series, lambda value: value != value.strip()).sum()
     )
 
     return ColumnQualityReport(
@@ -124,14 +166,100 @@ def _column_quality_report(
         missing_value_count=missing_count,
         blank_string_count=blank_string_count,
         missing_percentage=missing_percentage,
-        mixed_value_types=value_types if len(value_types) > 1 else [],
+        mixed_value_types=value_types,
         whitespace_padded_string_count=whitespace_padded_count,
     )
 
 
+def _clean_worksheet(
+    worksheet_name: str,
+    source_df: pd.DataFrame,
+    config: CleaningConfig,
+) -> tuple[pd.DataFrame, WorksheetQualityReport]:
+    """Audit and clean a single worksheet copy."""
+    dataframe = source_df.copy(deep=True)
+    row_count, column_count = dataframe.shape
+
+    # Quality analysis is performed before any row/column removal.
+    column_quality = [
+        _column_quality_report(dataframe.iloc[:, position], str(name))
+        for position, name in enumerate(dataframe.columns)
+    ]
+
+    empty_mask = _empty_cell_mask(dataframe)
+
+    if column_count:
+        empty_row_flags = empty_mask.all(axis=1)
+    else:
+        empty_row_flags = np.zeros(row_count, dtype=bool)
+
+    # Without any populated record there is no evidence a column is empty;
+    # retain the schema for downstream analysis.
+    has_records = bool(row_count) and not bool(empty_row_flags.all())
+    if has_records:
+        empty_column_flags = empty_mask.all(axis=0)
+    else:
+        empty_column_flags = np.zeros(column_count, dtype=bool)
+
+    # Duplicates are counted among non-empty rows over non-empty columns.
+    duplicate_flags = np.zeros(row_count, dtype=bool)
+    candidate_rows = np.flatnonzero(~empty_row_flags)
+    informative_columns = np.flatnonzero(~empty_column_flags)
+    if candidate_rows.size and informative_columns.size:
+        subset = dataframe.iloc[candidate_rows, informative_columns]
+        duplicate_flags[candidate_rows] = subset.duplicated(keep="first").to_numpy(
+            dtype=bool
+        )
+
+    keep_rows = np.ones(row_count, dtype=bool)
+    if config.remove_empty_rows:
+        keep_rows &= ~empty_row_flags
+    if config.remove_duplicate_rows:
+        keep_rows &= ~duplicate_flags
+
+    keep_columns = np.ones(column_count, dtype=bool)
+    if config.remove_empty_columns:
+        keep_columns &= ~empty_column_flags
+
+    cleaned = (
+        dataframe.iloc[np.flatnonzero(keep_rows), np.flatnonzero(keep_columns)]
+        .reset_index(drop=True)
+        .copy()
+    )
+
+    empty_row_positions = [int(position) for position in np.flatnonzero(empty_row_flags)]
+    empty_column_names = [
+        str(dataframe.columns[position])
+        for position in np.flatnonzero(empty_column_flags)
+    ]
+    duplicate_row_count = int(duplicate_flags.sum())
+
+    report = WorksheetQualityReport(
+        worksheet_name=worksheet_name,
+        original_row_count=row_count,
+        original_column_count=column_count,
+        cleaned_row_count=len(cleaned),
+        cleaned_column_count=len(cleaned.columns),
+        empty_row_positions=empty_row_positions,
+        empty_column_names=empty_column_names,
+        duplicate_row_count=duplicate_row_count,
+        removed_empty_row_count=(
+            len(empty_row_positions) if config.remove_empty_rows else 0
+        ),
+        removed_empty_column_count=(
+            len(empty_column_names) if config.remove_empty_columns else 0
+        ),
+        removed_duplicate_row_count=(
+            duplicate_row_count if config.remove_duplicate_rows else 0
+        ),
+        column_quality=column_quality,
+    )
+    return cleaned, report
+
+
 def clean_workbook(
     normalization_result: NormalizationResult,
-    config: CleaningConfig | None = None,
+    config: Optional[CleaningConfig] = None,
 ) -> CleaningResult:
     """Create cleaned worksheet copies and produce a data quality audit.
 
@@ -140,7 +268,8 @@ def clean_workbook(
     Duplicate rows are counted and retained by default.
 
     All quality metrics are calculated against the normalized input before
-    transformations. Original input DataFrames are never modified.
+    transformations. Original input DataFrames are never modified, and cleaned
+    DataFrames have a fresh zero-based index.
 
     Args:
         normalization_result: Output from ``normalize_workbook``.
@@ -165,140 +294,31 @@ def clean_workbook(
 
     for worksheet_name, source_df in normalization_result.worksheets.items():
         try:
-            dataframe = source_df.copy(deep=True)
-            original_row_count, original_column_count = dataframe.shape
-
-            # Quality analysis is performed before any row/column removal.
-            column_quality = [
-                _column_quality_report(dataframe, str(column_name))
-                for column_name in dataframe.columns
-            ]
-
-            empty_mask = _empty_cell_mask(dataframe)
-
-            if original_column_count:
-                empty_row_mask = empty_mask.all(axis=1)
-                empty_row_positions = [
-                    position
-                    for position, is_empty in enumerate(empty_row_mask.tolist())
-                    if is_empty
-                ]
-            else:
-                empty_row_mask = pd.Series(False, index=dataframe.index)
-                empty_row_positions = []
-
-            if original_row_count and original_column_count:
-                empty_column_mask = empty_mask.all(axis=0)
-                empty_column_names = [
-                    str(name)
-                    for name, is_empty in zip(
-                        dataframe.columns, empty_column_mask.tolist()
-                    )
-                    if is_empty
-                ]
-            else:
-                # With no records, there is no evidence that a header-only
-                # column is empty; retain the schema for downstream analysis.
-                empty_column_mask = pd.Series(
-                    False, index=dataframe.columns, dtype=bool
-                )
-                empty_column_names = []
-
-            # Ignore fully empty rows when counting duplicate business records.
-            non_empty_rows = dataframe.loc[~empty_row_mask]
-            duplicate_mask = non_empty_rows.duplicated(keep="first")
-            duplicate_row_count = int(duplicate_mask.sum())
-
-            if cleaning_config.remove_empty_rows:
-                dataframe = dataframe.loc[~empty_row_mask].copy()
-
-            if cleaning_config.remove_empty_columns and original_row_count:
-                keep_columns = ~empty_column_mask
-                dataframe = dataframe.loc[:, keep_columns].copy()
-
-            removed_duplicate_count = 0
-            if cleaning_config.remove_duplicate_rows and not dataframe.empty:
-                before_deduplication = len(dataframe)
-
-                if cleaning_config.remove_empty_rows:
-                    dataframe = dataframe.drop_duplicates(keep="first").copy()
-                else:
-                    # Keep fully empty rows even when duplicate removal is enabled.
-                    post_clean_empty_mask = _empty_cell_mask(dataframe)
-                    if dataframe.shape[1]:
-                        fully_empty_rows = post_clean_empty_mask.all(axis=1).tolist()
-                    else:
-                        fully_empty_rows = [False] * len(dataframe)
-
-                    non_empty_positions = [
-                        position
-                        for position, is_empty in enumerate(fully_empty_rows)
-                        if not is_empty
-                    ]
-                    non_empty_frame = dataframe.iloc[non_empty_positions]
-                    duplicate_positions = {
-                        position
-                        for position, is_duplicate in zip(
-                            non_empty_positions,
-                            non_empty_frame.duplicated(keep="first").tolist(),
-                        )
-                        if is_duplicate
-                    }
-                    keep_positions = [
-                        position
-                        for position in range(len(dataframe))
-                        if position not in duplicate_positions
-                    ]
-                    dataframe = dataframe.iloc[keep_positions].copy()
-
-                removed_duplicate_count = before_deduplication - len(dataframe)
+            cleaned, report = _clean_worksheet(
+                worksheet_name, source_df, cleaning_config
+            )
 
             # Carry column mappings/type metadata only for columns that remain.
-            remaining_columns = set(dataframe.columns)
-            source_mappings = normalization_result.column_mappings.get(
-                worksheet_name, []
-            )
-            source_types = normalization_result.column_types.get(
-                worksheet_name, []
-            )
-
+            remaining_columns = set(cleaned.columns)
             kept_mappings = [
                 mapping
-                for mapping in source_mappings
+                for mapping in normalization_result.column_mappings.get(
+                    worksheet_name, []
+                )
                 if mapping.normalized_name in remaining_columns
             ]
             kept_types = [
                 type_info
-                for type_info in source_types
+                for type_info in normalization_result.column_types.get(
+                    worksheet_name, []
+                )
                 if type_info.normalized_name in remaining_columns
             ]
 
-            cleaned_worksheets[worksheet_name] = dataframe
+            cleaned_worksheets[worksheet_name] = cleaned
+            quality_reports[worksheet_name] = report
             column_mappings[worksheet_name] = kept_mappings
             column_types[worksheet_name] = kept_types
-
-            quality_reports[worksheet_name] = WorksheetQualityReport(
-                worksheet_name=worksheet_name,
-                original_row_count=original_row_count,
-                original_column_count=original_column_count,
-                cleaned_row_count=len(dataframe),
-                cleaned_column_count=len(dataframe.columns),
-                empty_row_positions=empty_row_positions,
-                empty_column_names=empty_column_names,
-                duplicate_row_count=duplicate_row_count,
-                removed_empty_row_count=(
-                    len(empty_row_positions)
-                    if cleaning_config.remove_empty_rows
-                    else 0
-                ),
-                removed_empty_column_count=(
-                    len(empty_column_names)
-                    if cleaning_config.remove_empty_columns and original_row_count
-                    else 0
-                ),
-                removed_duplicate_row_count=removed_duplicate_count,
-                column_quality=column_quality,
-            )
 
         except Exception as exc:
             worksheet_errors[worksheet_name] = (

@@ -39,6 +39,8 @@ function App() {
 
   const [deletingId, setDeletingId] = useState(null);
   const [downloadingId, setDownloadingId] = useState(null);
+  const [processingId, setProcessingId] = useState(null);
+  const [processingResult, setProcessingResult] = useState(null);
 
   // Retrieve uploaded datasets from FastAPI
   const fetchDatasets = async () => {
@@ -213,6 +215,35 @@ function App() {
   );
 } finally {
       setDownloadingId(null);
+    }
+  };
+
+
+  // Process an uploaded workbook through Module 2
+  const handleProcess = async (dataset) => {
+    setProcessingId(dataset.dataset_id);
+    setProcessingResult(null);
+    setActionError("");
+    setActionSuccess("");
+
+    try {
+      const response = await api.post(
+        `/api/datasets/${dataset.dataset_id}/process`,
+        {},
+        { timeout: 120000 }
+      );
+
+      setProcessingResult(response.data);
+      setActionSuccess(`${dataset.filename} processed successfully.`);
+      await fetchDatasets();
+
+    } catch (err) {
+      setActionError(
+        err.response?.data?.detail ||
+        "Unable to process this workbook. Please try again."
+      );
+    } finally {
+      setProcessingId(null);
     }
   };
 
@@ -472,6 +503,16 @@ function App() {
                           <div className="action-buttons">
 
                             <button
+                              className="process-button"
+                              onClick={() => handleProcess(dataset)}
+                              disabled={processingId === dataset.dataset_id}
+                            >
+                              {processingId === dataset.dataset_id
+                                ? "Processing..."
+                                : "⚙ Process"}
+                            </button>
+
+                            <button
                               className="download-button"
                               onClick={() =>
                                 handleDownload(dataset)
@@ -515,6 +556,101 @@ function App() {
 
         </div>
 
+        {/* Module 2 Processing Results */}
+        {processingResult && (
+          <section className="processing-results">
+            <div className="processing-results-header">
+              <div>
+                <h2>Processing Results</h2>
+                <p className="subtitle">{processingResult.filename}</p>
+              </div>
+
+              <button
+                className="refresh-button"
+                onClick={() => setProcessingResult(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="processing-summary">
+              <div>
+                <strong>{processingResult.processing.total_worksheet_count}</strong>
+                <span>Total worksheets</span>
+              </div>
+              <div>
+                <strong>{processingResult.processing.successful_worksheet_count}</strong>
+                <span>Processed</span>
+              </div>
+              <div>
+                <strong>{processingResult.processing.failed_worksheet_count}</strong>
+                <span>Failed</span>
+              </div>
+            </div>
+
+            {Object.values(processingResult.worksheets).map((sheet) => (
+              <article className="sheet-result-card" key={sheet.worksheet_name}>
+                <div className="sheet-result-heading">
+                  <h3>{sheet.worksheet_name}</h3>
+                  <span>
+                    {sheet.row_count} rows · {sheet.column_count} columns
+                  </span>
+                </div>
+
+                <div className="column-chip-list">
+                  {sheet.columns.map((column) => (
+                    <span className="column-chip" key={column.name}>
+                      {column.name}
+                      <small>{column.data_category}</small>
+                    </span>
+                  ))}
+                </div>
+
+                <div className="quality-summary">
+                  <span>Empty rows removed: {sheet.quality.removed_empty_row_count}</span>
+                  <span>Empty columns removed: {sheet.quality.removed_empty_column_count}</span>
+                  <span>Duplicate rows found: {sheet.quality.duplicate_row_count}</span>
+                </div>
+
+                {sheet.preview.length > 0 ? (
+                  <div className="table-wrapper preview-wrapper">
+                    <table className="dataset-table preview-table">
+                      <thead>
+                        <tr>
+                          {Object.keys(sheet.preview[0]).map((column) => (
+                            <th key={column}>{column}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.preview.map((row, rowIndex) => (
+                          <tr key={rowIndex}>
+                            {Object.keys(sheet.preview[0]).map((column) => (
+                              <td key={column}>
+                                {row[column] === null ? "—" : String(row[column])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="empty-message">No data rows available for preview.</p>
+                )}
+              </article>
+            ))}
+
+            {Object.keys(processingResult.worksheet_errors || {}).length > 0 && (
+              <div className="status-message error">
+                <strong>Some worksheets could not be processed</strong>
+                {Object.entries(processingResult.worksheet_errors).map(([name, message]) => (
+                  <p key={name}><strong>{name}:</strong> {message}</p>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Download / Delete Feedback */}
         {actionError && (

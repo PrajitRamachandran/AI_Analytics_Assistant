@@ -1,14 +1,20 @@
 """Read Excel workbooks into independent worksheet DataFrames.
 
-This module intentionally performs ingestion only. It does not clean,
-normalise, or otherwise modify worksheet data.
+This module performs ingestion only. Cell values, blanks, duplicate rows and
+header text are left as Pandas reads them; the only structural decision made
+here is locating the header row when a worksheet begins with fully blank rows.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Union
+from typing import Any, Dict, List, Union
 
 import pandas as pd
+
+SUPPORTED_EXTENSIONS = (".xlsx", ".xlsm")
+_HEADER_PROBE_ROWS = 200
 
 
 @dataclass
@@ -17,7 +23,7 @@ class WorkbookIngestionResult:
 
     filename: str
     total_worksheet_count: int
-    worksheet_names: list[str] = field(default_factory=list)
+    worksheet_names: List[str] = field(default_factory=list)
     worksheets: Dict[str, pd.DataFrame] = field(default_factory=dict)
     worksheet_errors: Dict[str, str] = field(default_factory=dict)
 
@@ -36,20 +42,49 @@ class ExcelIngestionError(Exception):
     """Raised when a workbook cannot be opened for ingestion."""
 
 
+def _is_blank(value: Any) -> bool:
+    """Return whether a raw cell value is null or a whitespace-only string."""
+    if isinstance(value, str):
+        return not value.strip()
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _detect_header_row(workbook: pd.ExcelFile, sheet_name: str) -> int:
+    """Return the zero-based index of the first row containing any value."""
+    probe = workbook.parse(
+        sheet_name=sheet_name,
+        header=None,
+        nrows=_HEADER_PROBE_ROWS,
+    )
+    for position, row in enumerate(probe.itertuples(index=False, name=None)):
+        if not all(_is_blank(value) for value in row):
+            return position
+    return 0
+
+
+def _read_worksheet(workbook: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    """Read one worksheet, skipping fully blank rows above the header."""
+    header_row = _detect_header_row(workbook, sheet_name)
+    return workbook.parse(sheet_name=sheet_name, header=header_row)
+
+
 def ingest_excel_workbook(
     file_path: Union[str, Path],
 ) -> WorkbookIngestionResult:
-    """Read every worksheet in an ``.xlsx`` workbook into a DataFrame.
+    """Read every worksheet of an ``.xlsx``/``.xlsm`` workbook into a DataFrame.
 
     Each worksheet is read independently so a worksheet-level parsing error
-    does not prevent the remaining worksheets from being ingested.
+    does not prevent the remaining worksheets from being ingested. The first
+    non-blank row of each worksheet is used as its header. Formula cells are
+    read as the values cached by the application that last saved the file.
 
-    The source workbook is opened read-only by Pandas and is never modified.
-    Missing values, blank cells, duplicate rows, headers, and column names are
-    left as Pandas reads them; no cleaning or normalisation is performed.
+    The source workbook is opened read-only and is never modified.
 
     Args:
-        file_path: Path to the uploaded ``.xlsx`` workbook.
+        file_path: Path to the uploaded workbook.
 
     Returns:
         A WorkbookIngestionResult containing successfully read DataFrames and
@@ -57,15 +92,16 @@ def ingest_excel_workbook(
 
     Raises:
         FileNotFoundError: If the supplied path does not exist or is not a file.
-        ValueError: If the file does not have an ``.xlsx`` extension.
-        ExcelIngestionError: If the workbook cannot be opened or has no
-            readable workbook structure.
+        ValueError: If the file extension is not supported.
+        ExcelIngestionError: If the workbook cannot be opened or contains no
+            worksheets.
     """
-
     path = Path(file_path).expanduser()
 
-    if path.suffix.lower() != ".xlsx":
-        raise ValueError("Unsupported file extension. Only .xlsx files are supported.")
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            "Unsupported file extension. Only .xlsx and .xlsm files are supported."
+        )
 
     if not path.exists():
         raise FileNotFoundError(f"Excel workbook not found: {path}")
@@ -73,26 +109,21 @@ def ingest_excel_workbook(
     if not path.is_file():
         raise FileNotFoundError(f"Excel workbook path is not a file: {path}")
 
+    worksheets: Dict[str, pd.DataFrame] = {}
+    worksheet_errors: Dict[str, str] = {}
+
     try:
-        # Opening once discovers worksheet names and validates workbook access.
         with pd.ExcelFile(path, engine="openpyxl") as workbook:
-            sheet_names = workbook.sheet_names
+            sheet_names = [str(name) for name in workbook.sheet_names]
 
             if not sheet_names:
                 raise ExcelIngestionError(
                     f"The Excel workbook contains no worksheets: {path.name}"
                 )
 
-            worksheets: Dict[str, pd.DataFrame] = {}
-            worksheet_errors: Dict[str, str] = {}
-
             for sheet_name in sheet_names:
                 try:
-                    worksheets[sheet_name] = pd.read_excel(
-                        workbook,
-                        sheet_name=sheet_name,
-                        engine="openpyxl",
-                    )
+                    worksheets[sheet_name] = _read_worksheet(workbook, sheet_name)
                 except Exception as exc:
                     worksheet_errors[sheet_name] = (
                         f"Unable to read worksheet '{sheet_name}': {exc}"

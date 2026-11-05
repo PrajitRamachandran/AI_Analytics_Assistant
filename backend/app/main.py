@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.upload import router as upload_router
 from app.api.datasets import router as datasets_router
+from app.api.processing import router as processing_router
 
 app = FastAPI(
     title="AI Data Analytics Assistant",
@@ -36,3 +37,4 @@ async def health_check():
 
 app.include_router(upload_router)
 app.include_router(datasets_router)
+app.include_router(processing_router)

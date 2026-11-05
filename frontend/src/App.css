@@ -441,3 +441,142 @@ h1 {
     align-items: flex-start;
   }
 }
+
+/* ==============================
+   Module 2 Processing
+================================= */
+
+.process-button {
+  padding: 8px 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  color: #047857;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+}
+
+.process-button:hover:not(:disabled) {
+  background: #d1fae5;
+}
+
+.process-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.processing-results {
+  margin-top: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.processing-results-header,
+.sheet-result-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.processing-results-header h2,
+.sheet-result-heading h3 {
+  margin: 0 0 6px;
+  color: #1e293b;
+}
+
+.processing-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.processing-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 16px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.processing-summary strong {
+  color: #0f172a;
+  font-size: 24px;
+}
+
+.processing-summary span,
+.sheet-result-heading span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.sheet-result-card {
+  padding: 18px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.025);
+}
+
+.column-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.column-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 12px;
+}
+
+.column-chip small {
+  color: #64748b;
+  font-size: 10px;
+}
+
+.quality-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 12px 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.preview-wrapper {
+  margin-top: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.preview-table {
+  min-width: 500px;
+}
+
+.preview-table th,
+.preview-table td {
+  white-space: nowrap;
+}
+
+@media (max-width: 650px) {
+  .processing-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .processing-results-header,
+  .sheet-result-heading {
+    align-items: flex-start;
+  }
+}

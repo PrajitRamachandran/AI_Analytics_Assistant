@@ -157,3 +157,18 @@ def test_failure_in_one_worksheet_does_not_block_others(monkeypatch):
     assert "Good" in profile.worksheets
     assert "Bad" not in profile.worksheets
     assert "synthetic failure" in profile.worksheet_errors["Bad"]
+
+
+def test_mixed_date_formats_are_profiled_without_format_inference_warning():
+    result = _cleaning_result({
+        "Data": pd.DataFrame({
+            "event_date": pd.Series(
+                ["2025-01-02", "03/04/2025", "2025-05-06T12:30:00Z"],
+                dtype=object,
+            )
+        })
+    })
+    column = _sheet(profile_dataset(result), "Data").columns[0]
+    assert column.inferred_type == "date"
+    assert column.date_statistics.earliest is not None
+    assert column.date_statistics.latest is not None

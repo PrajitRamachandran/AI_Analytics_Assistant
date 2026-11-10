@@ -83,6 +83,10 @@ class TestProcessingAPI(unittest.TestCase):
             self.assertEqual(payload["row_count"], 2)
             self.assertEqual(payload["column_count"], 2)
             self.assertEqual(payload["quality"]["removed_empty_column_count"], 1)
+            self.assertIn("total_missing_value_count", payload["quality"])
+            self.assertIn("total_whitespace_padded_string_count", payload["quality"])
+            self.assertIn("whitespace_padded_string_count", payload["columns"][0])
+            self.assertIn("normalization", payload["columns"][0])
 
     def test_processing_endpoint_processes_dataset_and_updates_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -109,6 +113,8 @@ class TestProcessingAPI(unittest.TestCase):
 
             self.assertEqual(response["status"], "success")
             self.assertEqual(response["processing"]["successful_worksheet_count"], 1)
+            self.assertIn("normalized_cell_count", response["processing"])
+            self.assertIn("unparseable_cell_count", response["processing"])
             self.assertIn("Sales", response["worksheets"])
             self.assertEqual(len(update_connection.fake_cursor.executed), 1)
             self.assertIn(

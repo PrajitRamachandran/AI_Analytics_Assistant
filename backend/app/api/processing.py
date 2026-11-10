@@ -84,6 +84,12 @@ def _build_worksheet_response(processing_result, worksheet_name: str) -> dict:
         item.column_name: item
         for item in quality_report.column_quality
     }
+    normalization_audits = {
+        item.normalized_name: item
+        for item in processing_result.normalization.value_normalizations.get(
+            worksheet_name, []
+        )
+    }
 
     columns = []
     for column_name in dataframe.columns:
@@ -91,6 +97,7 @@ def _build_worksheet_response(processing_result, worksheet_name: str) -> dict:
         type_info = types.get(name)
         quality_info = quality.get(name)
 
+        normalization_info = normalization_audits.get(name)
         columns.append({
             "name": name,
             "original_name": str(mappings.get(name, name)),
@@ -109,6 +116,20 @@ def _build_worksheet_response(processing_result, worksheet_name: str) -> dict:
             "missing_percentage": (
                 quality_info.missing_percentage if quality_info else 0.0
             ),
+            "whitespace_padded_string_count": (
+                quality_info.whitespace_padded_string_count if quality_info else 0
+            ),
+            "mixed_value_types": (
+                quality_info.mixed_value_types if quality_info else []
+            ),
+            "normalization": {
+                "semantic_type": normalization_info.semantic_type,
+                "target_format": normalization_info.target_format,
+                "cells_changed": normalization_info.cells_changed,
+                "unparseable_count": normalization_info.unparseable_count,
+                "unparseable_samples": normalization_info.unparseable_samples,
+                "notes": normalization_info.notes,
+            } if normalization_info else None,
         })
 
     preview = []
@@ -135,6 +156,16 @@ def _build_worksheet_response(processing_result, worksheet_name: str) -> dict:
             "removed_empty_row_count": quality_report.removed_empty_row_count,
             "removed_empty_column_count": quality_report.removed_empty_column_count,
             "removed_duplicate_row_count": quality_report.removed_duplicate_row_count,
+            "total_missing_value_count": sum(
+                item.missing_value_count for item in quality_report.column_quality
+            ),
+            "total_blank_string_count": sum(
+                item.blank_string_count for item in quality_report.column_quality
+            ),
+            "total_whitespace_padded_string_count": sum(
+                item.whitespace_padded_string_count
+                for item in quality_report.column_quality
+            ),
         },
     }
 
@@ -230,6 +261,16 @@ def process_dataset(dataset_id: str):
                 "successful_worksheet_count": successful_count,
                 "failed_worksheet_count": failed_count,
                 "preview_row_limit": PREVIEW_ROW_LIMIT,
+                "normalized_cell_count": sum(
+                    audit.cells_changed
+                    for audits in processing_result.normalization.value_normalizations.values()
+                    for audit in audits
+                ),
+                "unparseable_cell_count": sum(
+                    audit.unparseable_count
+                    for audits in processing_result.normalization.value_normalizations.values()
+                    for audit in audits
+                ),
             },
             "worksheets": worksheet_results,
             "worksheet_errors": errors,

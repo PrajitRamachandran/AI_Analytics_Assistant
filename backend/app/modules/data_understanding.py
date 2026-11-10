@@ -136,11 +136,19 @@ def _infer_semantic_role(name: str, inferred_type: str, semantic_type: str = "")
 
 
 def _mixed_python_types(series: pd.Series) -> List[str]:
-    observed = {
-        type(value).__name__
-        for value in series.tolist()
-        if not pd.isna(value) and not _is_blank_string(value)
-    }
+    """Return distinct observed Python scalar types without ambiguous NA checks."""
+    observed: set[str] = set()
+    for value in series.tolist():
+        if _is_blank_string(value):
+            continue
+        try:
+            missing = pd.isna(value)
+            if isinstance(missing, (bool, np.bool_)) and missing:
+                continue
+        except (TypeError, ValueError):
+            # Non-scalar cell values are represented by their Python type.
+            pass
+        observed.add(type(value).__name__)
     return sorted(observed) if len(observed) > 1 else []
 
 
@@ -210,7 +218,12 @@ def _column_profile(
         )
     elif inferred_type == "date":
         # UTC normalization avoids comparison failures for mixed timezone offsets.
-        parsed = pd.to_datetime(present, errors="coerce", utc=True).dropna()
+        parsed = pd.to_datetime(
+            present,
+            format="mixed",
+            errors="coerce",
+            utc=True,
+        ).dropna()
         if len(parsed):
             parsed = parsed.dt.tz_convert(None)
         date_stats = DateStatistics(

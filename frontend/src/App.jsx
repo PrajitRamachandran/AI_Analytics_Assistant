@@ -1,7 +1,11 @@
 
 import { useEffect, useState } from "react";
 import api from "./services/api";
+import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import "./App.css";
+
+// Allows two bounded local-LLM attempts plus workbook processing overhead.
+const ANALYTICS_REQUEST_TIMEOUT_MS = 21 * 60 * 1000;
 
 // Convert file size into a readable format
 function formatFileSize(bytes) {
@@ -19,6 +23,35 @@ function formatDate(date) {
   if (!date) return "Unknown";
 
   return new Date(date).toLocaleString();
+}
+
+
+// Render profile values safely without exposing raw JSON objects.
+function formatProfileValue(value) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, {
+      maximumFractionDigits: 6,
+    });
+  }
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function formatProfileLabel(value) {
+  return String(value || "unknown")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function ProfileStat({ label, value }) {
+  return (
+    <div className="profile-stat">
+      <span>{label}</span>
+      <strong>{formatProfileValue(value)}</strong>
+    </div>
+  );
 }
 
 function App() {
@@ -41,6 +74,14 @@ function App() {
   const [downloadingId, setDownloadingId] = useState(null);
   const [processingId, setProcessingId] = useState(null);
   const [processingResult, setProcessingResult] = useState(null);
+  const [processedDatasetId, setProcessedDatasetId] = useState(null);
+
+  const [understandingResult, setUnderstandingResult] = useState(null);
+  const [understandingId, setUnderstandingId] = useState(null);
+  const [understandingError, setUnderstandingError] = useState("");
+  const [analyticsResult, setAnalyticsResult] = useState(null);
+  const [analyticsId, setAnalyticsId] = useState(null);
+  const [analyticsError, setAnalyticsError] = useState("");
 
   // Retrieve uploaded datasets from FastAPI
   const fetchDatasets = async () => {
@@ -223,6 +264,11 @@ function App() {
   const handleProcess = async (dataset) => {
     setProcessingId(dataset.dataset_id);
     setProcessingResult(null);
+    setProcessedDatasetId(null);
+    setUnderstandingResult(null);
+    setUnderstandingError("");
+    setAnalyticsResult(null);
+    setAnalyticsError("");
     setActionError("");
     setActionSuccess("");
 
@@ -234,6 +280,7 @@ function App() {
       );
 
       setProcessingResult(response.data);
+      setProcessedDatasetId(dataset.dataset_id);
       setActionSuccess(`${dataset.filename} processed successfully.`);
       await fetchDatasets();
 
@@ -244,6 +291,66 @@ function App() {
       );
     } finally {
       setProcessingId(null);
+    }
+  };
+
+  // Generate Module 3 data understanding for a successfully processed dataset.
+  const handleUnderstand = async () => {
+    if (!processedDatasetId) return;
+
+    setUnderstandingId(processedDatasetId);
+    setUnderstandingError("");
+    setUnderstandingResult(null);
+    setAnalyticsResult(null);
+    setAnalyticsError("");
+    setActionError("");
+    setActionSuccess("");
+
+    try {
+      const response = await api.post(
+        `/api/datasets/${processedDatasetId}/understand`,
+        {},
+        { timeout: 120000 }
+      );
+
+      setUnderstandingResult(response.data);
+      setActionSuccess(`${response.data.filename} profiled successfully.`);
+    } catch (err) {
+      setUnderstandingError(
+        err.response?.data?.detail ||
+        "Unable to understand this dataset. Please try again."
+      );
+    } finally {
+      setUnderstandingId(null);
+    }
+  };
+
+  // Generate a validated Module 4 plan, execute it deterministically, and return chart data.
+  const handleGenerateAnalytics = async () => {
+    if (!processedDatasetId) return;
+
+    setAnalyticsId(processedDatasetId);
+    setAnalyticsError("");
+    setAnalyticsResult(null);
+    setActionError("");
+    setActionSuccess("");
+
+    try {
+      const response = await api.post(
+        `/api/datasets/${processedDatasetId}/analytics`,
+        {},
+        { timeout: ANALYTICS_REQUEST_TIMEOUT_MS }
+      );
+      setAnalyticsResult(response.data);
+      setActionSuccess("Analytics generated and executed successfully.");
+    } catch (err) {
+      setAnalyticsError(
+        err.response?.data?.detail ||
+        err.message ||
+        "Unable to generate analytics. Please check the backend and Ollama."
+      );
+    } finally {
+      setAnalyticsId(null);
     }
   };
 
@@ -263,6 +370,15 @@ function App() {
       await api.delete(
         `/api/datasets/${dataset.dataset_id}`
       );
+
+      if (processedDatasetId === dataset.dataset_id) {
+        setProcessingResult(null);
+        setProcessedDatasetId(null);
+        setUnderstandingResult(null);
+        setUnderstandingError("");
+        setAnalyticsResult(null);
+        setAnalyticsError("");
+      }
 
       setActionSuccess(
         `${dataset.filename} deleted successfully.`
@@ -565,12 +681,33 @@ function App() {
                 <p className="subtitle">{processingResult.filename}</p>
               </div>
 
-              <button
-                className="refresh-button"
-                onClick={() => setProcessingResult(null)}
-              >
-                Close
-              </button>
+              <div className="processing-header-actions">
+                <button
+                  className="understand-button"
+                  onClick={handleGenerateAnalytics}
+                  disabled={Boolean(analyticsId) || !processedDatasetId}
+                >
+                  {analyticsId ? "Generating analytics..." : "✦ Generate Analytics Dashboard"}
+                </button>
+                <button
+                  className="understand-button"
+                  onClick={handleUnderstand}
+                  disabled={!processedDatasetId || understandingId === processedDatasetId}
+                >
+                  {understandingId === processedDatasetId
+                    ? "Understanding..."
+                    : understandingResult
+                      ? "↻ Re-run Understanding"
+                      : "✦ Understand Dataset"}
+                </button>
+
+                <button
+                  className="refresh-button"
+                  onClick={() => setProcessingResult(null)}
+                >
+                  Close
+                </button>
+              </div>
             </div>
 
             <div className="processing-summary">
@@ -586,6 +723,14 @@ function App() {
                 <strong>{processingResult.processing.failed_worksheet_count}</strong>
                 <span>Failed</span>
               </div>
+              <div>
+                <strong>{processingResult.processing.normalized_cell_count ?? 0}</strong>
+                <span>Values normalised</span>
+              </div>
+              <div>
+                <strong>{processingResult.processing.unparseable_cell_count ?? 0}</strong>
+                <span>Unparsed values preserved</span>
+              </div>
             </div>
 
             {Object.values(processingResult.worksheets).map((sheet) => (
@@ -599,7 +744,7 @@ function App() {
 
                 <div className="column-chip-list">
                   {sheet.columns.map((column) => (
-                    <span className="column-chip" key={column.name}>
+                    <span className="column-chip" key={column.name} title={`Original: ${column.original_name}`}>
                       {column.name}
                       <small>{column.data_category}</small>
                     </span>
@@ -609,8 +754,52 @@ function App() {
                 <div className="quality-summary">
                   <span>Empty rows removed: {sheet.quality.removed_empty_row_count}</span>
                   <span>Empty columns removed: {sheet.quality.removed_empty_column_count}</span>
-                  <span>Duplicate rows found: {sheet.quality.duplicate_row_count}</span>
+                  <span>Duplicate rows found: {sheet.quality.duplicate_row_count} (retained by default)</span>
+                  <span>Missing cells: {sheet.quality.total_missing_value_count}</span>
+                  <span>Blank strings: {sheet.quality.total_blank_string_count}</span>
+                  <span>Whitespace-padded values: {sheet.quality.total_whitespace_padded_string_count}</span>
                 </div>
+
+                <details className="processing-audit">
+                  <summary>View normalisation audit</summary>
+                  <div className="table-wrapper">
+                    <table className="dataset-table audit-table">
+                      <thead>
+                        <tr>
+                          <th>Column</th>
+                          <th>Original header</th>
+                          <th>Detected meaning</th>
+                          <th>Cells changed</th>
+                          <th>Unparsed values</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.columns.map((column) => (
+                          <tr key={column.name}>
+                            <td>{column.name}</td>
+                            <td>{column.original_name}</td>
+                            <td>{formatProfileLabel(column.normalization?.semantic_type || column.data_category)}</td>
+                            <td>{column.normalization?.cells_changed ?? 0}</td>
+                            <td>{column.normalization?.unparseable_count ?? 0}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {sheet.columns.some((column) => column.normalization?.notes?.length || column.normalization?.unparseable_samples?.length) && (
+                    <div className="normalization-notes">
+                      {sheet.columns.filter((column) => column.normalization?.notes?.length || column.normalization?.unparseable_samples?.length).map((column) => (
+                        <div key={column.name}>
+                          <strong>{column.name}</strong>
+                          {column.normalization?.notes?.map((note, index) => <p key={index}>{note}</p>)}
+                          {column.normalization?.unparseable_samples?.length > 0 && (
+                            <p>Preserved unparsed examples: {column.normalization.unparseable_samples.join(", ")}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
 
                 {sheet.preview.length > 0 ? (
                   <div className="table-wrapper preview-wrapper">
@@ -651,6 +840,259 @@ function App() {
             )}
           </section>
         )}
+
+        {/* Module 3 Data Understanding Results */}
+        {(understandingId || understandingError || understandingResult) && (
+          <section className="understanding-results">
+            <div className="understanding-results-header">
+              <div>
+                <p className="eyebrow">MODULE 3</p>
+                <h2>Dataset Understanding</h2>
+                <p className="subtitle">
+                  {understandingResult?.filename || processingResult?.filename}
+                </p>
+              </div>
+
+              {understandingResult && (
+                <button
+                  className="refresh-button"
+                  onClick={() => setUnderstandingResult(null)}
+                >
+                  Close
+                </button>
+              )}
+            </div>
+
+            {understandingId && (
+              <div className="understanding-loading">
+                <span className="loading-spinner" />
+                <div>
+                  <strong>Understanding your dataset...</strong>
+                  <p>Profiling worksheets and calculating column statistics.</p>
+                </div>
+              </div>
+            )}
+
+            {understandingError && (
+              <div className="status-message error">
+                <strong>Dataset understanding failed</strong>
+                <p>{understandingError}</p>
+                <button
+                  className="understand-button retry-understand-button"
+                  onClick={handleUnderstand}
+                  disabled={Boolean(understandingId)}
+                >
+                  Try Again
+                </button>
+              </div>
+            )}
+
+            {understandingResult && (
+              <>
+                <div className="understanding-summary">
+                  <ProfileStat
+                    label="Worksheets"
+                    value={understandingResult.total_worksheet_count}
+                  />
+                  <ProfileStat
+                    label="Successfully profiled"
+                    value={understandingResult.successful_worksheet_count}
+                  />
+                  <ProfileStat
+                    label="Failed"
+                    value={understandingResult.failed_worksheet_count}
+                  />
+                </div>
+
+                {Object.keys(understandingResult.worksheets || {}).length > 0 ? (
+                  <div className="understanding-sheet-list">
+                    {Object.entries(understandingResult.worksheets).map(
+                      ([sheetKey, sheet]) => (
+                        <details className="understanding-sheet" key={sheetKey}>
+                          <summary className="understanding-sheet-summary">
+                            <div className="summary-main">
+                              <strong>{sheet.worksheet_name || sheetKey}</strong>
+                              <span>
+                                {formatProfileValue(sheet.row_count)} rows
+                                {" · "}
+                                {formatProfileValue(sheet.column_count)} columns
+                              </span>
+                            </div>
+                            <span className="expand-hint">View profile</span>
+                          </summary>
+
+                          <div className="worksheet-profile-content">
+                            <div className="worksheet-profile-stats">
+                              <ProfileStat label="Numerical" value={sheet.numerical_column_count} />
+                              <ProfileStat label="Categorical" value={sheet.categorical_column_count} />
+                              <ProfileStat label="Date" value={sheet.date_column_count} />
+                              <ProfileStat label="Text" value={sheet.text_column_count} />
+                              <ProfileStat label="Boolean" value={sheet.boolean_column_count} />
+                              <ProfileStat label="Other" value={sheet.other_column_count} />
+                              <ProfileStat label="Missing values" value={sheet.total_missing_value_count} />
+                              <ProfileStat label="Blank strings" value={sheet.total_blank_string_count} />
+                              <ProfileStat label="Duplicate rows" value={sheet.duplicate_row_count} />
+                            </div>
+
+                            <div className="column-profile-heading">
+                              <h4>Column profiles</h4>
+                              <span>{sheet.columns?.length || 0} columns</span>
+                            </div>
+
+                            {sheet.columns?.length ? (
+                              <div className="column-profile-list">
+                                {sheet.columns.map((column) => (
+                                  <details className="column-profile" key={column.column_name}>
+                                    <summary>
+                                      <div className="column-summary-main">
+                                        <strong>{column.column_name}</strong>
+                                        {column.original_name !== column.column_name && (
+                                          <span>Original: {column.original_name}</span>
+                                        )}
+                                      </div>
+                                      <div className="column-summary-tags">
+                                        <span className={`type-tag type-${column.inferred_type}`}>
+                                          {formatProfileLabel(column.inferred_type)}
+                                        </span>
+                                        <span className="role-tag">
+                                          {formatProfileLabel(column.semantic_role)}
+                                        </span>
+                                      </div>
+                                    </summary>
+
+                                    <div className="column-profile-content">
+                                      <div className="column-metadata-grid">
+                                        <ProfileStat label="Pandas dtype" value={column.pandas_dtype} />
+                                        <ProfileStat label="Non-empty values" value={column.non_null_count} />
+                                        <ProfileStat label="Missing values" value={column.missing_value_count} />
+                                        <ProfileStat label="Blank strings" value={column.blank_string_count} />
+                                        <ProfileStat label="Missing %" value={`${formatProfileValue(column.missing_percentage)}%`} />
+                                        <ProfileStat label="Unique values" value={column.unique_value_count} />
+                                        <ProfileStat label="Unique %" value={`${formatProfileValue(column.unique_value_percentage)}%`} />
+                                      </div>
+
+                                      {column.sample_values?.length > 0 && (
+                                        <div className="profile-detail-block">
+                                          <h5>Sample values</h5>
+                                          <div className="sample-value-list">
+                                            {column.sample_values.map((value, index) => (
+                                              <span className="sample-value" key={`${column.column_name}-sample-${index}`}>
+                                                {formatProfileValue(value)}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {column.numerical_statistics && (
+                                        <div className="profile-detail-block">
+                                          <h5>Numerical statistics</h5>
+                                          <div className="column-metadata-grid">
+                                            <ProfileStat label="Minimum" value={column.numerical_statistics.minimum} />
+                                            <ProfileStat label="Maximum" value={column.numerical_statistics.maximum} />
+                                            <ProfileStat label="Mean" value={column.numerical_statistics.mean} />
+                                            <ProfileStat label="Median" value={column.numerical_statistics.median} />
+                                            <ProfileStat label="Total" value={column.numerical_statistics.total} />
+                                            <ProfileStat label="Std. deviation" value={column.numerical_statistics.standard_deviation} />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {column.categorical_statistics && (
+                                        <div className="profile-detail-block">
+                                          <h5>
+                                            Category distribution
+                                            <span>{column.categorical_statistics.unique_category_count} unique categories</span>
+                                          </h5>
+                                          {column.categorical_statistics.most_frequent?.length ? (
+                                            <div className="frequency-list">
+                                              {column.categorical_statistics.most_frequent.map((item, index) => (
+                                                <div className="frequency-row" key={`${column.column_name}-frequency-${index}`}>
+                                                  <span>{formatProfileValue(item.value)}</span>
+                                                  <strong>{formatProfileValue(item.count)}</strong>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ) : (
+                                            <p className="profile-muted">No category frequencies available.</p>
+                                          )}
+                                        </div>
+                                      )}
+
+                                      {column.date_statistics && (
+                                        <div className="profile-detail-block">
+                                          <h5>Date range</h5>
+                                          <div className="column-metadata-grid">
+                                            <ProfileStat label="Earliest" value={column.date_statistics.earliest} />
+                                            <ProfileStat label="Latest" value={column.date_statistics.latest} />
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {column.mixed_value_types?.length > 0 && (
+                                        <div className="profile-detail-block">
+                                          <h5>Mixed underlying value types</h5>
+                                          <div className="sample-value-list">
+                                            {column.mixed_value_types.map((type) => (
+                                              <span className="sample-value" key={type}>{type}</span>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="empty-message">No column profiles are available for this worksheet.</p>
+                            )}
+                          </div>
+                        </details>
+                      )
+                    )}
+                  </div>
+                ) : (
+                  <p className="empty-message">No worksheet profiles are available.</p>
+                )}
+
+                {Object.keys(understandingResult.worksheet_errors || {}).length > 0 && (
+                  <div className="status-message error">
+                    <strong>Some worksheets could not be profiled</strong>
+                    {Object.entries(understandingResult.worksheet_errors).map(([name, message]) => (
+                      <p key={name}><strong>{name}:</strong> {message}</p>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {analyticsId && (
+          <div className="understanding-loading">
+            <span className="loading-spinner" />
+            <div>
+              <strong>Generating your analytics dashboard...</strong>
+              <p>Ollama is preparing the plan. Pandas will calculate the actual results. This can take a few minutes on a local model.</p>
+            </div>
+          </div>
+        )}
+
+        {analyticsError && (
+          <div className="status-message error">
+            <strong>Analytics generation failed</strong>
+            <p>{analyticsError}</p>
+            <button
+              className="understand-button retry-understand-button"
+              onClick={handleGenerateAnalytics}
+              disabled={Boolean(analyticsId)}
+            >
+              Try Again
+            </button>
+          </div>
+        )}
+
+        <AnalyticsDashboard result={analyticsResult} />
 
         {/* Download / Delete Feedback */}
         {actionError && (

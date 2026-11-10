@@ -11,10 +11,10 @@ NormalizationResult, and normalize_workbook().
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 import math
 import re
 import unicodedata
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -23,6 +23,7 @@ import pandas as pd
 from pandas.api import types as ptypes
 
 from app.modules.excel_ingestion import WorkbookIngestionResult
+from app.modules.unit_normalization import normalize_worksheets as normalize_unit_worksheets
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ class NormalizationResult:
     column_types: Dict[str, List[ColumnTypeInfo]] = field(default_factory=dict)
     worksheet_errors: Dict[str, str] = field(default_factory=dict)
     value_normalizations: Dict[str, List[ColumnValueNormalization]] = field(default_factory=dict)
+    unit_normalization_reports: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def successful_worksheet_count(self) -> int:
@@ -182,6 +184,31 @@ def _comparison_text(value: Any) -> Optional[str]:
     return None
 
 
+def _binary_polarity(value: Any) -> Optional[bool]:
+    """Interpret a standard binary representation without guessing categories.
+
+    Returns True/False for common Boolean tokens and numeric 1/0 values;
+    returns None for every other value. This helper does not assign business
+    meanings such as attendance unless the caller has established that context.
+    """
+    key = _comparison_text(value)
+    if key in _BINARY_TRUE:
+        return True
+    if key in _BINARY_FALSE:
+        return False
+    if key is None:
+        return None
+    try:
+        number = float(key.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(number) and number == 1:
+        return True
+    if math.isfinite(number) and number == 0:
+        return False
+    return None
+
+
 def _display(value: Any) -> str:
     try:
         return str(value)
@@ -210,57 +237,39 @@ def _hint(pattern: str, name: str) -> bool:
     return bool(re.search(pattern, name, flags=re.I))
 
 
+
+def _explicit_unit_target(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return an explicit currency/duration target encoded in a normalized header."""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(name).casefold()).strip("_")
+    currency = re.search(r"(?:^|_)(inr|usd|gbp|eur)(?:$|_)", normalized)
+    if currency:
+        return "currency", currency.group(1)
+
+    duration = re.search(
+        r"(?:^|_)(hours?|hrs?|minutes?|mins?|seconds?|secs?|days?)(?:$|_)",
+        normalized,
+    )
+    if duration:
+        raw = duration.group(1)
+        aliases = {
+            "hr": "hours", "hrs": "hours", "hour": "hours", "hours": "hours",
+            "min": "minutes", "mins": "minutes", "minute": "minutes", "minutes": "minutes",
+            "sec": "seconds", "secs": "seconds", "second": "seconds", "seconds": "seconds",
+            "day": "days", "days": "days",
+        }
+        return "duration", aliases.get(raw, raw)
+    return None, None
+
+
 # ---------------------------------------------------------------------------
-# Semantic vocabularies. Unknown values are deliberately not mapped.
+# Generic binary tokens
 # ---------------------------------------------------------------------------
 
-_ATTENDANCE = {
-    "present": "Present", "pres": "Present", "prsnt": "Present",
-    "attended": "Present", "attending": "Present", "here": "Present",
-    "p": "Present", "pr": "Present", "1": "Present", "yes": "Present", "y": "Present", "true": "Present",
-    "absent": "Absent", "abs": "Absent", "absnt": "Absent",
-    "absentee": "Absent", "no show": "Absent", "noshow": "Absent",
-    "not present": "Absent", "did not attend": "Absent", "a": "Absent", "0": "Absent", "no": "Absent", "n": "Absent", "false": "Absent",
-    "ab": "Absent",
-    "late": "Late", "tardy": "Late", "delayed": "Late", "late arrival": "Late",
-    "leave": "Leave", "on leave": "Leave", "lv": "Leave", "sick": "Leave",
-    "sick leave": "Leave", "medical leave": "Leave", "casual leave": "Leave",
-    "vacation": "Leave", "pto": "Leave", "l": "Leave", "cl": "Leave", "sl": "Leave",
-    "half day": "Half Day", "halfday": "Half Day", "half": "Half Day", "hd": "Half Day",
-    "holiday": "Holiday", "hol": "Holiday", "weekly off": "Holiday",
-    "week off": "Holiday", "day off": "Holiday", "wo": "Holiday", "h": "Holiday",
-}
-
-_GENDER = {
-    "m": "Male", "male": "Male", "man": "Male", "boy": "Male", "gents": "Male",
-    "f": "Female", "female": "Female", "woman": "Female", "girl": "Female",
-    "ladies": "Female", "o": "Other", "other": "Other", "others": "Other",
-    "nb": "Other", "non binary": "Other", "nonbinary": "Other",
-    "transgender": "Other", "third gender": "Other",
-    "prefer not to say": "Undisclosed", "undisclosed": "Undisclosed",
-    "not specified": "Undisclosed",
-}
-
-_BOOLEAN = {
-    "yes": True, "y": True, "true": True, "t": True, "1": True,
-    "on": True, "yep": True, "yeah": True, "✓": True, "✔": True, "☑": True,
-    "no": False, "n": False, "false": False, "f": False, "0": False,
-    "off": False, "nope": False, "✗": False, "✘": False, "✕": False, "☐": False,
-}
-
-_STATUS = {
-    "paid": "Paid", "unpaid": "Unpaid", "partially paid": "Partially Paid",
-    "partial paid": "Partially Paid", "pending": "Pending", "overdue": "Overdue",
-    "shipped": "Shipped", "shipping": "Shipped", "delivered": "Delivered",
-    "in transit": "In Transit", "in-transit": "In Transit",
-    "processing": "Processing", "processed": "Processed",
-    "returned": "Returned", "refunded": "Refunded", "cancelled": "Cancelled",
-    "canceled": "Cancelled", "open": "Open", "in progress": "In Progress",
-    "resolved": "Resolved", "closed": "Closed", "on hold": "On Hold",
-    "high": "High", "medium": "Medium", "low": "Low", "urgent": "Urgent",
-    "critical": "Critical", "normal": "Normal",
-}
-
+# These are format-level boolean representations, not dataset categories.
+# They are only applied when a column is confidently identified as Boolean or
+# attendance-related. Arbitrary categorical values are never added to a map.
+_BINARY_TRUE = {"yes", "y", "true", "t", "1", "on"}
+_BINARY_FALSE = {"no", "n", "false", "f", "0", "off"}
 
 # ---------------------------------------------------------------------------
 # Date and time parsing
@@ -535,9 +544,7 @@ _DATE_HINT = r"(^|_)(date|dob|datetime|timestamp|created_at|updated_at|modified_
 _TIME_HINT = r"(^|_)(time|in_time|out_time|start_time|end_time|login_time|logout_time)(_|$)"
 _IDENTIFIER_HINT = r"(^|_)(id|code|phone|mobile|contact|zip|pin|pincode|aadhaar|aadhar|ssn|reg|roll|account|acc|ifsc|isbn|sku|barcode)(_|$)"
 _BOOLEAN_HINT = r"^(is|has|was|can|should|did|does)_.+|(^|_)(flag|enabled|active|eligible|verified|approved|paid|completed|passed|selected|available|required|opt_in|opted)(_|$)"
-_ATTENDANCE_HINT = r"attend|(^|_)(presence|present|absent|absence)(_|$)"
-_GENDER_HINT = r"(^|_)(gender|sex)(_|$)"
-_STATUS_HINT = r"(^|_)(status|state|priority|level|type|category)(_|$)"
+_ATTENDANCE_HINT = r"attend|presence|present|absent|absence"
 _NUMERIC_HINT = r"(^|_)(amount|price|cost|total|quantity|qty|count|number|num|hours|hrs|duration|score|rate|percent|percentage|salary|revenue|debit|credit|balance|worked|resolution_time)(_|$)"
 
 
@@ -557,17 +564,24 @@ def _normalize_column(
     if not present:
         return _Outcome(series.copy(deep=True), "empty", str(series.dtype))
 
-    attendance_hint = _hint(_ATTENDANCE_HINT, name)
-    gender_hint = _hint(_GENDER_HINT, name)
+    numeric_hint = _hint(_NUMERIC_HINT, name)
+    # A measure such as attendance_count or absence_days is numeric data, not
+    # a categorical attendance marker. Do not let its header trigger recoding.
+    attendance_measure_hint = bool(re.search(
+        r"(^|_)(days?|weeks?|months?|hours?|count|total|number|rate|percent|percentage|duration)(_|$)",
+        name,
+        flags=re.I,
+    ))
+    attendance_hint = _hint(_ATTENDANCE_HINT, name) and not numeric_hint and not attendance_measure_hint
     boolean_hint = _hint(_BOOLEAN_HINT, name)
     date_hint = _hint(_DATE_HINT, name)
     time_hint = _hint(_TIME_HINT, name)
     identifier_hint = _hint(_IDENTIFIER_HINT, name)
-    status_hint = _hint(_STATUS_HINT, name)
-    numeric_hint = _hint(_NUMERIC_HINT, name)
 
-    # Native Boolean dtype is unambiguous.
-    if ptypes.is_bool_dtype(series.dtype):
+    # Native Boolean dtype is unambiguous. Attendance columns are handled below
+    # first so Yes/No and 1/0 become Present/Absent when the column context says
+    # those values represent attendance rather than a generic Boolean flag.
+    if ptypes.is_bool_dtype(series.dtype) and not attendance_hint:
         return _Outcome(series.astype("boolean"), "boolean", "True/False")
 
     # Native datetime columns are already typed; normalize timezone to naive UTC.
@@ -579,78 +593,90 @@ def _normalize_column(
             notes.append("timezone-aware values converted to naive UTC")
         return _Outcome(out, "datetime", "datetime64[ns]", notes=notes)
 
-    # Gender/boolean vocabularies are mapped per cell; unknown values survive.
-    if gender_hint:
-        mapped, changes = [], 0
+    # Attendance normalization is context-aware and data-driven:
+    # - A column named for attendance/presence is sufficient context.
+    # - Otherwise, explicit Present/Absent values in the same column establish
+    #   the meaning of short and Boolean-style representations.
+    # - P/A are derived from the observed canonical labels, not treated as
+    #   attendance codes in arbitrary status columns.
+    # - Unknown categories (for example WFH, Remote, Training) remain untouched.
+    attendance_context = attendance_hint or worksheet_attendance_context
+    if attendance_context:
+        mapped: List[Any] = []
+        recognized = 0
+        # For a dedicated absence/absent flag, affirmative binary values mean
+        # Absent and negative values mean Present. Explicit P/A and full labels
+        # retain their direct meanings regardless of the column orientation.
+        absence_flag = bool(re.search(r"(^|_)(absence|absent)(_|$)", name, flags=re.I)) and not bool(
+            re.search(r"(^|_)(attendance|attend|presence|present)(_|$)", name, flags=re.I)
+        )
         for value in original:
             key = _comparison_text(value)
-            replacement = _GENDER.get(key) if key is not None else None
-            if replacement is None:
-                mapped.append(value)
-            else:
-                mapped.append(replacement)
-                changes += not _same(value, replacement)
-        if any(_comparison_text(v) in _GENDER for v in present):
-            return _Outcome(_series_preserving_values(mapped, series.index, series.name),
-                            "gender", "Male/Female/Other/Undisclosed",
-                            notes=["Unrecognized gender categories were preserved."])
-    if boolean_hint:
-        mapped, changes, failures = [], 0, []
-        for value in original:
-            key = _comparison_text(value)
-            if key in _BOOLEAN:
-                replacement = ("Yes" if _BOOLEAN[key] else "No") if config.boolean_as_yes_no else _BOOLEAN[key]
-                mapped.append(replacement)
-                changes += not _same(value, replacement)
-            else:
-                mapped.append(value)
-                if not _is_null(value):
-                    failures.append(_display(value))
-        if any(_comparison_text(v) in _BOOLEAN for v in present):
-            return _Outcome(_series_preserving_values(mapped, series.index, series.name),
-                            "boolean", "Yes/No" if config.boolean_as_yes_no else "True/False",
-                            failures, len(failures),
-                            ["Unrecognized values were preserved rather than nulled."])
+            replacement_value = None
+            if key is not None:
+                # Canonical labels are inferred from the attendance domain.
+                if key == "present":
+                    replacement_value = "Present"
+                elif key == "absent":
+                    replacement_value = "Absent"
+                # P/A are safe only after attendance context has been established.
+                elif key and len(key) <= 2 and "present".startswith(key):
+                    replacement_value = "Present"
+                elif key and len(key) <= 2 and "absent".startswith(key):
+                    replacement_value = "Absent"
+                # Common binary encodings are format variants, not new categories.
+                else:
+                    polarity = _binary_polarity(value)
+                    if polarity is True:
+                        replacement_value = "Absent" if absence_flag else "Present"
+                    elif polarity is False:
+                        replacement_value = "Present" if absence_flag else "Absent"
 
-    # Short attendance codes are ambiguous in isolation (P can mean Pending,
-    # Paid, Priority, etc.). For generic status columns, interpret P/A only when
-    # the worksheet contains strong attendance evidence in full words.
-    if attendance_hint or (status_hint and worksheet_attendance_context):
-        mapped, failures = [], []
-        for value in original:
-            key = _comparison_text(value)
-            replacement = _ATTENDANCE.get(key) if key is not None else None
-            if replacement is None:
+            if replacement_value is None:
                 mapped.append(value)
-                if not _is_null(value):
-                    failures.append(_display(value))
             else:
-                mapped.append(replacement)
-        if any(_comparison_text(v) in _ATTENDANCE for v in present):
+                mapped.append(replacement_value)
+                recognized += 1
+
+        if recognized:
             return _Outcome(
                 _series_preserving_values(mapped, series.index, series.name),
-                "attendance", "canonical attendance labels; unknown values preserved",
-                failures[:5], len(failures),
-                ["Short attendance codes were interpreted using worksheet-level attendance evidence.",
-                 "Unknown categories were preserved unchanged."],
+                "attendance",
+                "Present/Absent; unrecognized categories preserved",
+                notes=[
+                    "Attendance aliases were normalized using column context and observed values.",
+                    "Unrecognized categories were preserved exactly as supplied.",
+                ],
             )
 
-    # Known business status vocabulary. Unknown statuses remain byte-for-byte as
-    # supplied (including abbreviations not in the controlled vocabulary).
-    if status_hint:
-        mapped, changes = [], 0
+    # Generic Boolean columns use format-level true/false representations.
+    # This is deliberately separate from attendance and does not touch
+    # categorical columns whose meaning is unknown.
+    if boolean_hint:
+        mapped: List[Any] = []
+        failures: List[str] = []
+        recognized = 0
         for value in original:
-            key = _comparison_text(value)
-            replacement = _STATUS.get(key) if key is not None else None
-            if replacement is None:
-                mapped.append(value)
+            polarity = _binary_polarity(value)
+            if polarity is True:
+                mapped.append("Yes" if config.boolean_as_yes_no else True)
+                recognized += 1
+            elif polarity is False:
+                mapped.append("No" if config.boolean_as_yes_no else False)
+                recognized += 1
             else:
-                mapped.append(replacement)
-                changes += not _same(value, replacement)
-        if any(_comparison_text(v) in _STATUS for v in present):
-            return _Outcome(_series_preserving_values(mapped, series.index, series.name),
-                            "categorical", "canonical known category labels",
-                            notes=["Unknown categories were preserved unchanged."])
+                mapped.append(value)
+                if not _is_null(value):
+                    failures.append(_display(value))
+        if recognized:
+            return _Outcome(
+                _series_preserving_values(mapped, series.index, series.name),
+                "boolean",
+                "Yes/No" if config.boolean_as_yes_no else "True/False",
+                failures[:5],
+                len(failures),
+                ["Unrecognized values were preserved rather than nulled."] if failures else [],
+            )
 
     # Dates are attempted before numeric parsing to avoid treating date-like
     # strings as quantities. A hinted date column may contain invalid entries;
@@ -742,47 +768,29 @@ def _normalize_column(
 # Worksheet-level contextual inference
 # ---------------------------------------------------------------------------
 
-_ATTENDANCE_FULL_WORDS = {
-    "present", "pres", "prsnt", "attended", "attending", "here",
-    "absent", "abs", "absnt", "absentee", "no show", "noshow",
-    "not present", "did not attend",
-}
-_PRESENT_WORDS = {"present", "pres", "prsnt", "attended", "attending", "here"}
-_ABSENT_WORDS = {"absent", "abs", "absnt", "absentee", "no show", "noshow", "not present", "did not attend"}
+def _column_has_attendance_context(
+    dataframe: pd.DataFrame,
+    target_position: int,
+    column_name: str = "",
+) -> bool:
+    """Infer attendance context from this column only.
 
-
-def _column_has_attendance_context(dataframe: pd.DataFrame, target_position: int) -> bool:
-    """Infer P/A only with evidence local to the column or aligned peer cells.
-
-    This avoids turning a payment/status "P" into Present merely because an
-    unrelated attendance column exists elsewhere in the worksheet.
+    A matching column name or explicit Present/Absent anchor values is required.
+    Short codes are not inferred from unrelated peer columns, avoiding false
+    positives such as interpreting a payment status ``P`` as attendance.
     """
-    target = dataframe.iloc[:, target_position].tolist()
-    target_keys = [_comparison_text(value) for value in target]
-    has_present = any(key in _PRESENT_WORDS for key in target_keys)
-    has_absent = any(key in _ABSENT_WORDS for key in target_keys)
-    if has_present and has_absent:
+    measure_hint = _hint(_NUMERIC_HINT, column_name) or bool(re.search(
+        r"(^|_)(days?|weeks?|months?|hours?|count|total|number|rate|percent|percentage|duration)(_|$)",
+        column_name,
+        flags=re.I,
+    ))
+    if _hint(_ATTENDANCE_HINT, column_name) and not measure_hint:
         return True
-
-    short_positions = [(i, key) for i, key in enumerate(target_keys) if key in {"p", "pr", "a", "ab"}]
-    if not short_positions:
+    if target_position < 0 or target_position >= dataframe.shape[1]:
         return False
-
-    corroborated = 0
-    for row_position, short_code in short_positions:
-        expected = _PRESENT_WORDS if short_code in {"p", "pr"} else _ABSENT_WORDS
-        row_has_matching_peer = False
-        for peer_position in range(dataframe.shape[1]):
-            if peer_position == target_position:
-                continue
-            peer_key = _comparison_text(dataframe.iat[row_position, peer_position])
-            if peer_key in expected:
-                row_has_matching_peer = True
-                break
-        if row_has_matching_peer:
-            corroborated += 1
-    # Require all observed short codes to have row-aligned corroboration.
-    return corroborated == len(short_positions)
+    values = dataframe.iloc[:, target_position].tolist()
+    keys = {_comparison_text(value) for value in values}
+    return {"present", "absent"}.issubset(keys)
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +811,10 @@ def _classify_dtype(series: pd.Series, semantic_type: str = "") -> str:
     if semantic_type == "empty":
         return "empty"
     dtype = series.dtype
+    # CategoricalDtype is neither an object nor a string dtype. Check it
+    # explicitly before the generic dtype fallbacks.
+    if isinstance(dtype, pd.CategoricalDtype):
+        return "categorical"
     if ptypes.is_bool_dtype(dtype):
         return "boolean"
     if ptypes.is_datetime64_any_dtype(dtype):
@@ -841,35 +853,165 @@ def normalize_workbook(
     column_mappings: Dict[str, List[ColumnNameMapping]] = {}
     column_types: Dict[str, List[ColumnTypeInfo]] = {}
     value_normalizations: Dict[str, List[ColumnValueNormalization]] = {}
+    unit_normalization_reports: Dict[str, Any] = {}
     worksheet_errors = dict(ingestion_result.worksheet_errors)
 
     for worksheet_name, original_df in ingestion_result.worksheets.items():
         try:
+            # Take an isolated worksheet copy before accessing its structure.
+            # This also ensures an unsupported/broken worksheet object fails
+            # inside this worksheet's error boundary rather than mid-loop.
+            source_df = original_df.copy(deep=True)
             used_names: Set[str] = set()
             mappings: List[ColumnNameMapping] = []
             types: List[ColumnTypeInfo] = []
             audits: List[ColumnValueNormalization] = []
             output_columns: List[pd.Series] = []
-            normalized_names: List[str] = []
-            for position, original_name in enumerate(original_df.columns):
-                normalized_name = _unique_name(_base_column_name(original_name, position), used_names)
-                normalized_names.append(normalized_name)
-                mappings.append(ColumnNameMapping(position, original_name, normalized_name))
 
-                original_series = original_df.iloc[:, position].copy(deep=True)
-                if settings.normalize_values:
+            # Normalize headers first so explicit targets such as
+            # "Amount (INR)" and "Duration - Hours" can be detected.
+            normalized_names = [
+                _unique_name(_base_column_name(original_name, position), used_names)
+                for position, original_name in enumerate(source_df.columns)
+            ]
+            for position, original_name in enumerate(source_df.columns):
+                mappings.append(
+                    ColumnNameMapping(position, original_name, normalized_names[position])
+                )
+
+            # Run the unit-aware stage only when at least one normalized
+            # header explicitly declares a supported target. Non-target columns
+            # retain their original Pandas dtypes and values.
+            target_columns = {
+                position: _explicit_unit_target(normalized_name)
+                for position, normalized_name in enumerate(normalized_names)
+            }
+            has_unit_targets = any(
+                dimension is not None
+                for dimension, _target in target_columns.values()
+            )
+
+            unit_df = source_df.copy(deep=True)
+            unit_df.columns = normalized_names
+            unit_report = None
+            if settings.normalize_values and has_unit_targets:
+                unit_result = normalize_unit_worksheets({worksheet_name: unit_df})
+                unit_df = unit_result.worksheets.get(worksheet_name, unit_df)
+                unit_report = unit_result.report
+            unit_normalization_reports[worksheet_name] = unit_report
+
+            for position, original_name in enumerate(source_df.columns):
+                normalized_name = normalized_names[position]
+                original_series = source_df.iloc[:, position].copy(deep=True)
+                dimension, target = target_columns[position]
+
+                if not settings.normalize_values:
+                    outcome = _Outcome(
+                        original_series.copy(deep=True),
+                        "unchanged",
+                        str(original_series.dtype),
+                    )
+                elif dimension is not None:
+                    unit_series = unit_df.iloc[:, position].copy(deep=True)
+                    unit_values = [
+                        float(value) if isinstance(value, Decimal) else value
+                        for value in unit_series.tolist()
+                    ]
+
+                    # Keep the established number-word parser for hour columns.
+                    # The unit prototype handles conversions; the existing
+                    # normalizer handles values such as "four hours".
+                    if dimension == "duration" and target == "hours":
+                        # The existing normalizer already handles hour-target
+                        # columns, including number words ("four hours") and
+                        # minute/second/day conversion. Use the original values
+                        # here rather than the prototype's partial parse.
+                        legacy_input = original_series.copy(deep=True)
+                        legacy_input.name = normalized_name
+                        try:
+                            outcome = _normalize_column(
+                                legacy_input,
+                                normalized_name,
+                                settings,
+                                worksheet_attendance_context=_column_has_attendance_context(
+                                    source_df, position, normalized_name
+                                ),
+                            )
+                        except Exception as exc:
+                            outcome = _Outcome(
+                                legacy_input.copy(deep=True),
+                                "unchanged",
+                                str(legacy_input.dtype),
+                                notes=[
+                                    f"Normalization safely skipped after error: {type(exc).__name__}: {exc}"
+                                ],
+                            )
+                    else:
+                        populated = [
+                            value for value in unit_values if not _is_null(value)
+                        ]
+                        all_numeric = bool(populated) and all(
+                            isinstance(value, (int, float, np.integer, np.floating))
+                            and not isinstance(value, (bool, np.bool_))
+                            and math.isfinite(float(value))
+                            for value in populated
+                        )
+                        if all_numeric:
+                            converted_series = pd.to_numeric(
+                                pd.Series(
+                                    unit_values,
+                                    index=unit_series.index,
+                                    name=normalized_name,
+                                ),
+                                errors="raise",
+                            )
+                        else:
+                            converted_series = _series_preserving_values(
+                                unit_values, unit_series.index, normalized_name
+                            )
+
+                        has_numeric = any(
+                            isinstance(value, (int, float, np.integer, np.floating))
+                            and not isinstance(value, (bool, np.bool_))
+                            and math.isfinite(float(value))
+                            for value in unit_values
+                        )
+                        semantic = "numeric" if has_numeric else "text"
+                        target_label = (
+                            f"{target.upper()} major currency units"
+                            if dimension == "currency"
+                            else f"{target} duration units"
+                        )
+                        outcome = _Outcome(
+                            converted_series,
+                            semantic,
+                            target_label,
+                            notes=[
+                                "Explicit unit normalization applied; incompatible or unrecognized values were preserved."
+                            ],
+                        )
+                else:
+                    # No explicit target: run the established V1 normalizer
+                    # against the untouched Series. This preserves categorical,
+                    # datetime, identifier and other native Pandas dtypes.
                     try:
                         outcome = _normalize_column(
-                            original_series, normalized_name, settings,
-                            worksheet_attendance_context=_column_has_attendance_context(original_df, position),
+                            original_series,
+                            normalized_name,
+                            settings,
+                            worksheet_attendance_context=_column_has_attendance_context(
+                                source_df, position, normalized_name
+                            ),
                         )
                     except Exception as exc:
                         outcome = _Outcome(
-                            original_series.copy(deep=True), "unchanged", str(original_series.dtype),
-                            notes=[f"Normalization safely skipped after error: {type(exc).__name__}: {exc}"],
+                            original_series.copy(deep=True),
+                            "unchanged",
+                            str(original_series.dtype),
+                            notes=[
+                                f"Normalization safely skipped after error: {type(exc).__name__}: {exc}"
+                            ],
                         )
-                else:
-                    outcome = _Outcome(original_series.copy(deep=True), "unchanged", str(original_series.dtype))
 
                 new_series = outcome.series.copy(deep=True)
                 new_series.name = normalized_name
@@ -906,7 +1048,7 @@ def normalize_workbook(
                 normalized_df = pd.concat(output_columns, axis=1)
                 normalized_df.columns = normalized_names
             else:
-                normalized_df = original_df.copy(deep=True)
+                normalized_df = source_df.copy(deep=True)
 
             normalized_worksheets[worksheet_name] = normalized_df
             column_mappings[worksheet_name] = mappings
@@ -926,4 +1068,5 @@ def normalize_workbook(
         column_types=column_types,
         worksheet_errors=worksheet_errors,
         value_normalizations=value_normalizations,
+        unit_normalization_reports=unit_normalization_reports,
     )

@@ -574,7 +574,8 @@ def test_fallback_creates_grouped_chart_when_profile_has_safe_dimension():
     grouped = next(operation for operation in result.operations if operation.operation_type == "group_by")
     assert grouped.group_by_columns == ["region"]
     assert result.visualizations[0].operation_id == grouped.id
-    assert result.visualizations[0].chart_type == "bar"
+    # Record counts over two categories are a part-to-whole view.
+    assert result.visualizations[0].chart_type == "pie"
 
 
 def test_prepared_profile_exposes_worksheet_role_without_dropping_reference_sheet():
@@ -1123,3 +1124,128 @@ def test_planner_output_executes_into_multiple_charts():
     assert len(execution["charts"]) >= 4
     assert all(chart.get("data") or chart.get("points") or chart for chart in execution["charts"])
     assert any(k["value"] == 45 for k in execution["kpis"])  # average salary
+
+
+# ---------------------------------------------------------------------------
+# Chart-type selection
+# ---------------------------------------------------------------------------
+
+def _chart_types(plan, profile, vizzes):
+    from app.modules.analytics_planner.plan_sanitizer import sanitize_plan
+
+    cleaned = sanitize_plan(plan, profile)
+    validate_analytical_plan(cleaned, profile)
+    return {v.id: v.chart_type for v in cleaned.visualizations}
+
+
+def _group_op(op_id, column, function, measure="gross_salary", group="department"):
+    return {
+        "id": op_id, "operation_type": "group_by", "worksheet_name": "Payroll",
+        "title": f"{function} by {group}", "description": "Grouped result.",
+        "group_by_columns": [group],
+        "aggregations": [{"alias": "value", "function": function,
+                          "column": None if function == "count" else measure}],
+    }
+
+
+def test_chart_type_follows_the_computation_not_a_bar_default():
+    profile = payroll_profile()
+    ops = [
+        _group_op("sum_dept", "department", "sum"),                 # additive, 4 cats
+        _group_op("avg_region", "region", "average", group="region"),  # not additive
+        {"id": "trend_sum", "operation_type": "time_series",
+         "worksheet_name": "Payroll", "title": "Salary trend",
+         "description": "Monthly salary.", "date_column": "join_date",
+         "interval": "month",
+         "metric": {"alias": "total", "function": "sum", "column": "gross_salary"}},
+        {"id": "share", "operation_type": "percentage_of_total",
+         "worksheet_name": "Payroll", "title": "Share", "description": "Share.",
+         "category_column": "region", "value_column": "gross_salary"},
+    ]
+    plan = payroll_plan(operations=ops, visualizations=[
+        _payroll_viz("v_sum", "sum_dept", "bar"),
+        _payroll_viz("v_avg", "avg_region", "bar"),
+        _payroll_viz("v_trend", "trend_sum", "line"),
+        _payroll_viz("v_share", "share", "bar"),
+    ])
+    types = _chart_types(plan, profile, None)
+
+    assert types == {
+        "v_sum": "pie",      # few additive categories
+        "v_avg": "bar",      # averages are not parts of a whole
+        "v_trend": "area",   # summed totals over time
+        "v_share": "donut",  # explicit shares
+    }
+
+
+def test_average_trend_stays_a_line_and_deliberate_choices_are_respected():
+    profile = payroll_profile()
+    ops = [
+        {"id": "trend_avg", "operation_type": "time_series",
+         "worksheet_name": "Payroll", "title": "Trend", "description": "Trend.",
+         "date_column": "join_date", "interval": "month",
+         "metric": {"alias": "avg", "function": "average", "column": "gross_salary"}},
+        _group_op("sum_dept", "department", "sum"),
+    ]
+    plan = payroll_plan(operations=ops, visualizations=[
+        _payroll_viz("v_trend", "trend_avg", "line"),
+        _payroll_viz("v_table", "sum_dept", "table"),
+    ])
+    assert _chart_types(plan, profile, None) == {
+        "v_trend": "line", "v_table": "table",
+    }
+
+
+def test_part_to_whole_charts_are_capped_and_never_used_for_negative_measures():
+    profile = payroll_profile()
+    ops = [_group_op(f"count_{i}", "department", "count") for i in range(1)]
+    ops += [
+        _group_op("count_region", "region", "count", group="region"),
+        _group_op("sum_region", "region", "sum", group="region"),
+    ]
+    plan = payroll_plan(operations=ops, visualizations=[
+        _payroll_viz("v1", "count_0", "bar"),
+        _payroll_viz("v2", "count_region", "bar"),
+        _payroll_viz("v3", "sum_region", "bar"),
+    ])
+    types = _chart_types(plan, profile, None)
+    assert sorted(types.values()).count("bar") == 1
+    assert sum(t in {"pie", "donut"} for t in types.values()) == 2
+
+    data = profile.model_dump(mode="json")
+    for column in data["worksheets"]["Payroll"]["columns"]:
+        if column["column_name"] == "gross_salary":
+            column["numerical_statistics"]["minimum"] = -5
+    negative = DatasetProfile.model_validate(data)
+    only_sum = payroll_plan(
+        operations=[_group_op("sum_dept", "department", "sum")],
+        visualizations=[_payroll_viz("v1", "sum_dept", "bar")],
+    )
+    assert _chart_types(only_sum, negative, None) == {"v1": "bar"}
+
+
+def test_wide_category_sets_use_a_table():
+    data = payroll_profile().model_dump(mode="json")
+    for column in data["worksheets"]["Payroll"]["columns"]:
+        if column["column_name"] == "department":
+            column["unique_value_count"] = 30
+            column["non_null_count"] = 60
+    profile = DatasetProfile.model_validate(data)
+    plan = payroll_plan(
+        operations=[_group_op("sum_dept", "department", "sum")],
+        visualizations=[_payroll_viz("v1", "sum_dept", "bar")],
+    )
+    assert _chart_types(plan, profile, None) == {"v1": "table"}
+
+
+def test_planner_produces_a_variety_of_chart_types():
+    profile = payroll_profile()
+    plan = payroll_plan(
+        operations=_payroll_ops(), kpis=[_payroll_kpi()],
+        visualizations=[_payroll_viz(chart_type="bar")],
+    )
+    result = AnalyticsPlanner(plan_generator=_OneShotGenerator(plan)).generate_plan(profile)
+
+    kinds = {v.chart_type for v in result.visualizations}
+    assert len(kinds) >= 3, kinds
+    validate_analytical_plan(result, profile)

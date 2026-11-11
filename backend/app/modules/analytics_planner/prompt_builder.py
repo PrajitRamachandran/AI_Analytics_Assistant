@@ -100,6 +100,7 @@ PLAN REQUIREMENTS
   non-negative shares, else bar (table optional). comparison: bar or table.
   Several charts may share one operation only as genuinely different views.
   Never recommend scatter in V1.
+  Match the chart to the question: trends line/area, shares pie/donut, rankings bar.
 - Visualization descriptions: one or two short sentences saying what is
   compared or trended, without inventing findings.
 

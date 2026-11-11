@@ -133,7 +133,97 @@ def _prune_operations(
     plan.operations = kept[:MAX_OPERATIONS]
 
 
-def _repair_visualizations(plan: WorkbookAnalyticsPlan) -> None:
+# Part-to-whole charts only make sense for a few additive categories.
+_MAX_PART_TO_WHOLE_CATEGORIES = 6
+_MAX_PART_TO_WHOLE_CHARTS = 2
+# Beyond this many categories a bar chart is unreadable; show a table.
+_MAX_BAR_CATEGORIES = 20
+_ADDITIVE_FUNCTIONS = {"sum", "count", "distinct_count"}
+
+
+def _column_profile(
+    dataset_profile: DatasetProfile, worksheet: str, column: Optional[str],
+) -> Any:
+    sheet = dataset_profile.worksheets.get(worksheet)
+    if sheet is None or column is None:
+        return None
+    return next((c for c in sheet.columns if c.column_name == column), None)
+
+
+def _is_non_negative(
+    dataset_profile: DatasetProfile, worksheet: str, aggregation: Any,
+) -> bool:
+    """Whether an additive measure is known to contain no negative values."""
+    if aggregation.function == "count":
+        return True
+    column = _column_profile(dataset_profile, worksheet, aggregation.column)
+    stats = getattr(column, "numerical_statistics", None)
+    return stats is not None and stats.minimum is not None and stats.minimum >= 0
+
+
+def _recommend_chart_type(
+    operation: Any, dataset_profile: DatasetProfile, part_to_whole_used: int,
+) -> Optional[str]:
+    """
+    Pick the chart that best fits what an operation computes.
+
+    Returns None to keep the chart type the model chose. Bar remains the
+    answer for rankings, comparisons and wide category sets.
+    """
+    kind = operation.operation_type
+
+    if kind == "time_series":
+        function = operation.metric.function
+        # Cumulative-looking totals read well as areas; rates and averages as lines.
+        return "area" if function in {"sum", "count"} else "line"
+
+    if kind == "group_by":
+        aggregation = operation.aggregations[0]
+        dimension = _column_profile(
+            dataset_profile, operation.worksheet_name,
+            operation.group_by_columns[0],
+        )
+        categories = int(getattr(dimension, "unique_value_count", 0) or 0)
+        if len(operation.group_by_columns) > 1 or categories < 2:
+            return "table" if len(operation.group_by_columns) > 1 else None
+        if categories > _MAX_BAR_CATEGORIES:
+            return "table"
+        if (
+            categories <= _MAX_PART_TO_WHOLE_CATEGORIES
+            and aggregation.function in _ADDITIVE_FUNCTIONS
+            and _is_non_negative(
+                dataset_profile, operation.worksheet_name, aggregation,
+            )
+            and part_to_whole_used < _MAX_PART_TO_WHOLE_CHARTS
+        ):
+            return "pie" if categories <= 4 else "donut"
+        return "bar"
+
+    if kind == "percentage_of_total":
+        dimension = _column_profile(
+            dataset_profile, operation.worksheet_name, operation.category_column,
+        )
+        value = _column_profile(
+            dataset_profile, operation.worksheet_name, operation.value_column,
+        )
+        stats = getattr(value, "numerical_statistics", None)
+        categories = int(getattr(dimension, "unique_value_count", 0) or 0)
+        if (
+            2 <= categories <= _MAX_PART_TO_WHOLE_CATEGORIES
+            and stats is not None and stats.minimum is not None
+            and stats.minimum >= 0
+            and part_to_whole_used < _MAX_PART_TO_WHOLE_CHARTS
+        ):
+            return "donut"
+        return "bar"
+
+    return None
+
+
+def _repair_visualizations(
+    plan: WorkbookAnalyticsPlan,
+    dataset_profile: DatasetProfile,
+) -> None:
     """Keep charts linked to real non-scalar operations with valid types."""
     operations = {operation.id: operation for operation in plan.operations}
     kept, seen_ids = [], set()
@@ -149,6 +239,17 @@ def _repair_visualizations(plan: WorkbookAnalyticsPlan) -> None:
         allowed = _CHARTS_BY_OPERATION[operation.operation_type]
         if visualization.chart_type not in allowed:
             visualization.chart_type = allowed[0]
+
+        # Small models default to bar for everything. Replace that default
+        # with the type that fits the computation; deliberate choices of any
+        # other type are respected.
+        if visualization.chart_type in {"bar", "line"}:
+            recommended = _recommend_chart_type(
+                operation, dataset_profile,
+                sum(1 for v in kept if v.chart_type in {"pie", "donut"}),
+            )
+            if recommended in allowed:
+                visualization.chart_type = recommended
 
         chosen = types_by_operation.setdefault(operation.id, set())
         chart_type = visualization.chart_type
@@ -197,7 +298,7 @@ def sanitize_plan(
     _clean_narratives(cleaned)
     _prune_operations(cleaned, dataset_profile)
     _repair_kpis(cleaned)
-    _repair_visualizations(cleaned)
+    _repair_visualizations(cleaned, dataset_profile)
     return cleaned
 
 

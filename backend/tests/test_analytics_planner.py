@@ -310,8 +310,8 @@ def test_validator_rejects_unsupported_correlation_question():
 def test_ollama_defaults_match_the_verified_tuned_configuration():
     client = OllamaClient()
     assert client.timeout_seconds == 600
-    assert client.context_length == 12288
-    assert client.max_output_tokens == 1024
+    assert client.context_length == 16384
+    assert client.max_output_tokens == 2048
     assert client.temperature == 0.1
 
 

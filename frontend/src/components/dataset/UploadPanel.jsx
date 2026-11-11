@@ -4,68 +4,53 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export default function UploadPanel({ file, uploading, progress, error, result, onFileChange, onUpload, onViewDatasets }) {
+export default function UploadPanel({ file, uploading, progress, onFileChange, onUpload }) {
   return (
-    <section className="upload-card" id="upload-card" aria-labelledby="upload-heading">
-      <div className="upload-icon" aria-hidden="true">📊</div>
-      <h2 id="upload-heading">Upload Excel Workbook</h2>
-      <p className="upload-description">Select an Excel file to get started with your analysis.</p>
+    <section className="upload-card upload-card-compact" id="upload-card" aria-labelledby="upload-heading">
+      <div className="upload-card-intro">
+        <div className="upload-icon" aria-hidden="true">📊</div>
+        <div>
+          <h2 id="upload-heading">Upload Excel Workbook</h2>
+          <p className="upload-description">Choose an Excel workbook to begin your analysis.</p>
+        </div>
+      </div>
 
-      <label className="file-picker">
-        Choose Excel File
-        <input
-          type="file"
-          accept=".xlsx"
-          onChange={(event) => onFileChange(event.target.files?.[0])}
-          disabled={uploading}
-          aria-label="Choose an Excel workbook"
-        />
-      </label>
-      <p className="file-hint">Supported format: .xlsx · Maximum size: 25 MB</p>
+      <div className="upload-picker-row">
+        <label className="file-picker">
+          <span>Choose Excel File</span>
+          <input
+            type="file"
+            accept=".xlsx"
+            onChange={(event) => { if (event.target.files?.[0]) onFileChange(event.target.files[0]); }}
+            disabled={uploading}
+            aria-label="Choose an Excel workbook"
+          />
+        </label>
+        <p className="file-hint">.xlsx format <span aria-hidden="true">·</span> Maximum size 25 MB</p>
+      </div>
 
       {file && (
-        <div className="selected-file" aria-live="polite">
-          <span aria-hidden="true">📄</span>
-          <div className="file-details">
-            <strong>{file.name}</strong>
-            <small>{formatFileSize(file.size)}</small>
+        <div className="upload-selection-row">
+          <button type="button" className="upload-button upload-button-inline" onClick={onUpload} disabled={uploading}>
+            {uploading ? `Uploading ${progress}%…` : "Upload File"}
+          </button>
+          <div className="selected-file selected-file-compact" aria-live="polite">
+            <span className="selected-file-icon" aria-hidden="true">📄</span>
+            <div className="file-details">
+              <strong title={file.name}>{file.name}</strong>
+              <small>{formatFileSize(file.size)} · Ready to upload</small>
+            </div>
+            {!uploading && <button type="button" className="remove-selected-file" onClick={() => onFileChange(null)} aria-label="Remove selected file">×</button>}
           </div>
         </div>
       )}
 
       {uploading && (
-        <div className="progress-section" aria-live="polite">
-          <div className="progress-label">
-            <span>Uploading...</span>
-            <span>{progress}%</span>
-          </div>
+        <div className="progress-section upload-progress-compact" aria-live="polite">
+          <div className="progress-label"><span>Uploading workbook</span><span>{progress}%</span></div>
           <div className="progress-track" role="progressbar" aria-valuenow={progress} aria-valuemin="0" aria-valuemax="100" aria-label="Upload progress">
             <div className="progress-fill" style={{ width: `${progress}%` }} />
           </div>
-        </div>
-      )}
-
-      <button className="upload-button" onClick={onUpload} disabled={!file || uploading}>
-        {uploading ? "Uploading..." : "Upload File"}
-      </button>
-
-      {error && (
-        <div className="status-message error" role="alert">
-          <strong>Upload Failed</strong>
-          <p>{error}</p>
-        </div>
-      )}
-
-      {result && (
-        <div className="status-message success" role="status">
-          <strong>Upload Successful!</strong>
-          <p>{result.filename}</p>
-          <small>Dataset ID: {result.dataset_id}</small>
-          {onViewDatasets && (
-            <button className="upload-success-link" type="button" onClick={onViewDatasets}>
-              View my datasets →
-            </button>
-          )}
         </div>
       )}
     </section>

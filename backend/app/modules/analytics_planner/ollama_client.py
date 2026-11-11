@@ -48,8 +48,8 @@ class OllamaClient:
         model: str = "qwen3.5:4b",
         timeout_seconds: float = 600.0,
         temperature: float = 0.1,
-        context_length: int = 12288,
-        max_output_tokens: int = 1024,
+        context_length: int = 16384,
+        max_output_tokens: int = 2048,
         disable_thinking: bool = True,
     ) -> None:
         if not isinstance(base_url, str) or not base_url.strip():
@@ -237,6 +237,24 @@ class OllamaClient:
                 )
             raise OllamaResponseError("Ollama returned empty response content.")
 
+        # Keep the actual model response visible in backend logs for debugging.
+        # The response is a structured analytics plan, not a dataset dump.
+        logger.info(
+            "OLLAMA RAW MODEL OUTPUT BEGIN | model=%s | chars=%d",
+            self.model,
+            len(content),
+        )
+        logger.info(
+            "OLLAMA RAW MODEL OUTPUT:\\n%s",
+            content[:20000],
+        )
+        if len(content) > 20000:
+            logger.warning(
+                "Ollama model output was truncated in logs (total_chars=%d).",
+                len(content),
+            )
+        logger.info("OLLAMA RAW MODEL OUTPUT END | model=%s", self.model)
+
         try:
             parsed_json = json.loads(content)
         except (TypeError, ValueError) as exc:
@@ -297,8 +315,8 @@ def create_ollama_client(model: str | None = None) -> OllamaClient:
     try:
         timeout_seconds = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
         temperature = float(os.getenv("OLLAMA_TEMPERATURE", "0.1"))
-        context_length = int(os.getenv("OLLAMA_CONTEXT_LENGTH", "12288"))
-        max_output_tokens = int(os.getenv("OLLAMA_MAX_OUTPUT_TOKENS", "1024"))
+        context_length = int(os.getenv("OLLAMA_CONTEXT_LENGTH", "16384"))
+        max_output_tokens = int(os.getenv("OLLAMA_MAX_OUTPUT_TOKENS", "2048"))
     except ValueError as exc:
         raise ValueError("One or more OLLAMA numeric settings are invalid.") from exc
 

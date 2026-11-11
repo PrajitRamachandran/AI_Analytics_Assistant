@@ -84,9 +84,7 @@ FEASIBILITY AND GROUNDING
 - Sum/average/min/max require numerical measures. Never aggregate identifiers.
 - Count may omit its column to count rows. Distinct-count may use a suitable
   profiled column.
-- Grouping dimensions must be categorical or boolean. Never use numerical,
-  date, identifier, free-text, notes, or high-cardinality columns as grouping
-  dimensions. Use a low/medium-cardinality category supported by the profile.
+- Grouping dimensions must be categorical or boolean. NEVER use a numerical, date, identifier, free-text, notes, or high-cardinality columns as grouping dimensions. Use a low/medium-cardinality category supported by the profile.
 - Never group by raw dates; use time_series with an explicit interval.
 - Comparison requires two distinct observed non-null values explicitly listed
   in categorical frequencies. If those values are unavailable, do not compare.

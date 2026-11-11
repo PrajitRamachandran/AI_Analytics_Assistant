@@ -64,7 +64,3 @@ The workspace now has route foundations for Overview, Upload Dataset, My Dataset
 ## Update 2 — Upload and dataset pages
 
 `/upload` and `/datasets` now host the existing upload and dataset-management components independently. The overview is a compact summary with recent datasets. See `UPDATE_2_UPLOAD_AND_DATASETS.md`.
-
-
-## Update 5
-The analytics planner model is selected directly from the Analytics workflow page. Workspace Settings now focuses on appearance and accessibility. The Analytics page also includes refined model controls, chart surfaces, responsive behavior and focus states.

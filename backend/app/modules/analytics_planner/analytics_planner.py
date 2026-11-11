@@ -187,7 +187,7 @@ class AnalyticsPlanner:
                             "Your previous JSON was valid JSON but did not satisfy "
                             "the required analytics-plan schema. Validation errors: "
                             f"{exc.validation_errors}. Correct the reported fields "
-                            "and return a complete replacement JSON object. The root "
+                            "and return a complete replacement JSON object. Do not use null for required scalar fields. The root "
                             "object must contain exactly these fields: plan_version, "
                             "workbook_summary, business_context, worksheet_analyses, "
                             "operations, kpis, visualizations, key_questions, and "

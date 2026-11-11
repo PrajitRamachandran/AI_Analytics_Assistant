@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import api from "./services/api";
 import UploadPanel from "./components/dataset/UploadPanel";
+import ToastNotice from "./components/ToastNotice";
 import DatasetHistory from "./components/dataset/DatasetHistory";
 import AppLayout from "./components/layout/AppLayout";
 import { useAppLocation, useAppNavigate } from "./app/navigation";
@@ -9,6 +10,7 @@ import { resolveRoute } from "./app/routeConfig";
 import DataExplorer from "./components/explorer/DataExplorer";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
 import AnalyticsModelSelector from "./components/AnalyticsModelSelector";
+import AddModelPage from "./pages/AddModel";
 import { getAllWorkflowResults, saveWorkflowResult, deleteWorkflowResult } from "./services/workflowStore";
 import "./App.css";
 
@@ -23,6 +25,7 @@ function App() {
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [uploadToast, setUploadToast] = useState(null);
 
   const [datasets, setDatasets] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
@@ -182,22 +185,26 @@ function App() {
     if (!selectedFile.name.toLowerCase().endsWith(".xlsx")) {
       setFile(null);
       setError("Only .xlsx files are currently supported.");
+      setUploadToast({ type: "error", title: "Unsupported file", message: "Only .xlsx workbooks are currently supported." });
       return;
     }
 
     if (selectedFile.size === 0) {
       setFile(null);
       setError("The selected file is empty.");
+      setUploadToast({ type: "error", title: "Empty file", message: "Please choose a workbook that contains data." });
       return;
     }
 
     if (selectedFile.size > 25 * 1024 * 1024) {
       setFile(null);
       setError("File exceeds the maximum size of 25 MB.");
+      setUploadToast({ type: "error", title: "File too large", message: "The maximum upload size is 25 MB." });
       return;
     }
 
     setFile(selectedFile);
+    setUploadToast(null);
   };
 
   // Upload the selected Excel workbook
@@ -232,6 +239,7 @@ function App() {
       );
 
       setResult(response.data);
+      setUploadToast({ type: "success", title: "Upload successful", message: `${response.data.filename || file.name} was added to My Datasets.` });
       setFile(null);
       setProgress(100);
 
@@ -240,11 +248,11 @@ function App() {
 
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setError(
-        err.response?.status === 409
-          ? (detail || "File already exists. This workbook has already been uploaded.")
-          : (detail || err.message || "Upload failed. Please try again.")
-      );
+      const message = err.response?.status === 409
+        ? (detail || "File already exists. This workbook has already been uploaded.")
+        : (detail || err.message || "Upload failed. Please try again.");
+      setError(message);
+      setUploadToast({ type: "error", title: "Upload failed", message });
     } finally {
       setUploading(false);
     }
@@ -326,17 +334,22 @@ function App() {
   };
 
   const uploadPage = (
-    <div className="app-container dedicated-page">
-      <header className="app-header">
+    <div className="app-container dedicated-page upload-page">
+      <header className="app-header upload-page-header">
         <div>
           <p className="eyebrow">WORKSPACE / DATA INGESTION</p>
           <h1>Upload Dataset</h1>
-          <p className="subtitle">Upload an Excel workbook to begin preparing and analysing your data.</p>
+          <p className="subtitle">Choose an Excel workbook to add it to your analytics workspace.</p>
         </div>
       </header>
-      <UploadPanel file={file} uploading={uploading} progress={progress} error={error}
-        result={result} onFileChange={handleFileChange} onUpload={handleUpload}
-        onViewDatasets={() => navigate("/datasets")} />
+      <UploadPanel file={file} uploading={uploading} progress={progress}
+        onFileChange={handleFileChange} onUpload={handleUpload} />
+      <ToastNotice
+        type={uploadToast?.type || "info"}
+        title={uploadToast?.title}
+        message={uploadToast?.message}
+        onDismiss={() => setUploadToast(null)}
+      />
     </div>
   );
 
@@ -468,7 +481,7 @@ function App() {
   );
 
   return (
-    <AppLayout pageContent={{ upload: uploadPage, datasets: datasetsPage, processing: stagePage, profile: stagePage, analytics: stagePage }}>
+    <AppLayout pageContent={{ upload: uploadPage, datasets: datasetsPage, processing: stagePage, profile: stagePage, analytics: stagePage, addModel: <AddModelPage /> }}>
       {overviewPage}
     </AppLayout>
   );

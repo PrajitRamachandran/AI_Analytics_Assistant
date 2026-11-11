@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import { ACCENTS } from "../context/appearanceUtils";
+import api from "../services/api";
 
 const ACCENT_OPTIONS = [
   { id: "blue", label: "Blue" },
@@ -14,6 +15,24 @@ const ACCENT_OPTIONS = [
 export default function Settings() {
   const { settings, resolvedTheme, updateSetting, resetSettings } = useTheme();
   const [confirmReset, setConfirmReset] = useState(false);
+  const [apiKeys, setApiKeys] = useState({});
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [keysError, setKeysError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.get("/api/settings/api-keys")
+      .then((response) => {
+        if (active) setApiKeys(response.data.environment || {});
+      })
+      .catch((error) => {
+        if (active) setKeysError(error.response?.data?.detail || "Unable to load environment configuration.");
+      })
+      .finally(() => {
+        if (active) setKeysLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   return (
     <div className="settings-page">
@@ -75,6 +94,28 @@ export default function Settings() {
             <span /> <span className="settings-switch-label">{settings.reduceMotion ? "On" : "Off"}</span>
           </button>
         </div>
+      </section>
+
+      <section className="settings-section">
+        <div className="settings-section-heading">
+          <div>
+            <h2>Model credentials & configuration</h2>
+            <p>Environment values used by your analytics model providers. Secret values are masked and never exposed in full.</p>
+          </div>
+        </div>
+        {keysLoading ? <p className="settings-inline-message">Loading environment configuration…</p>
+          : keysError ? <p className="settings-inline-message is-error" role="alert">{keysError}</p>
+          : <div className="settings-env-list">
+            {Object.entries(apiKeys).map(([key, item]) => (
+              <div className="settings-env-row" key={key}>
+                <div><strong>{key}</strong><small>{item.secret ? "Secret credential" : "Configuration value"}</small></div>
+                <code>{item.configured ? item.value : "Not configured"}</code>
+                <span className={`settings-env-status ${item.configured ? "is-configured" : ""}`}>{item.configured ? "Configured" : "Missing"}</span>
+              </div>
+            ))}
+            {Object.keys(apiKeys).length === 0 && <p className="settings-inline-message">No environment configuration was returned by the backend.</p>}
+          </div>}
+        <p className="settings-inline-message">Values are read from the backend <code>.env</code> file. To replace a credential, add or reconnect the relevant model from the Analytics model selector.</p>
       </section>
 
       <section className="settings-section settings-preview-section">

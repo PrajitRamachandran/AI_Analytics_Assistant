@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import api from "../services/api";
+import { useAppNavigate } from "../app/navigation";
 
 export default function AnalyticsModelSelector() {
+  const navigate = useAppNavigate();
   const [models, setModels] = useState([]);
   const [selected, setSelected] = useState({ provider: "", model: "" });
   const [loading, setLoading] = useState(true);
@@ -53,15 +55,16 @@ export default function AnalyticsModelSelector() {
           <p className="eyebrow">ANALYTICS CONFIGURATION</p>
           <h2 id="analytics-model-title">Planner model</h2>
           <p>Choose the model that plans charts and insights. All numerical calculations remain deterministic.</p>
-          {selected.model && <span className="analytics-active-model">Active · {selected.provider} / {selected.model}</span>}
+          {selected.model && <span className="analytics-active-model">Active · {selected.provider === "openai_compatible" ? "Cloud API" : selected.provider} / {selected.model}</span>}
         </div>
       </div>
       <div className="analytics-model-controls">
         <label className="sr-only" htmlFor="analytics-page-model">Select analytics model</label>
         <select id="analytics-page-model" value={selected.provider && selected.model ? `${selected.provider}::${selected.model}` : ""} onChange={saveSelection} disabled={loading || saving || models.length === 0}>
           <option value="">{loading ? "Discovering models…" : "Select a model"}</option>
-          {models.map((item) => <option key={`${item.provider}::${item.model}`} value={`${item.provider}::${item.model}`}>{item.provider === "ollama" ? "Local · " : "Cloud · "}{item.model}</option>)}
+          {models.map((item) => <option key={`${item.provider}::${item.model}`} value={`${item.provider}::${item.model}`}>{item.provider === "ollama" ? "Local · " : item.provider === "groq" ? "Groq · " : item.provider === "openai_compatible" ? "Cloud API · " : "Cloud · "}{item.model}</option>)}
         </select>
+        <button type="button" className="secondary-button compact-action" onClick={() => navigate("/models/add")}>+ Add model</button>
         <button type="button" className="secondary-button compact-action" onClick={loadModels} disabled={loading || saving}>{loading ? "Loading…" : "Refresh"}</button>
       </div>
       {saving && <p className="analytics-model-feedback">Saving model selection…</p>}

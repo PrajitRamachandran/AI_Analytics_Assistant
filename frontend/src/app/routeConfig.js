@@ -25,6 +25,7 @@ export const PAGE_META = {
   profile: { title: "Data Profile", description: "Understand columns, distributions and data quality." },
   analytics: { title: "Analytics", description: "Explore generated KPIs, charts and insights." },
   settings: { title: "Settings", description: "Manage your workspace preferences." },
+  addModel: { title: "Add model", description: "Connect a local or cloud analytics model." },
 };
 
 export function resolveRoute(pathname) {
@@ -32,6 +33,7 @@ export function resolveRoute(pathname) {
   if (pathname === "/upload") return { id: "upload" };
   if (pathname === "/datasets") return { id: "datasets" };
   if (pathname === "/settings") return { id: "settings" };
+  if (pathname === "/models/add") return { id: "addModel" };
 
   const datasetRoute = pathname.match(/^\/datasets\/([^/]+)\/(processing|profile|analytics)$/);
   if (datasetRoute) {

@@ -7,6 +7,7 @@ test("resolves primary workspace routes", () => {
   assert.equal(resolveRoute("/upload").id, "upload");
   assert.equal(resolveRoute("/datasets").id, "datasets");
   assert.equal(resolveRoute("/settings").id, "settings");
+  assert.equal(resolveRoute("/models/add").id, "addModel");
 });
 
 test("resolves dataset-scoped workflow routes and decodes identifiers", () => {
@@ -21,5 +22,6 @@ test("resolves dataset-scoped workflow routes and decodes identifiers", () => {
 test("returns a not-found route for unknown paths", () => {
   assert.equal(resolveRoute("/unknown").id, "notFound");
   assert.ok(PAGE_META.overview);
+  assert.ok(PAGE_META.addModel);
   assert.ok(NAV_GROUPS.some((group) => group.items.some((item) => item.path === "/datasets")));
 });

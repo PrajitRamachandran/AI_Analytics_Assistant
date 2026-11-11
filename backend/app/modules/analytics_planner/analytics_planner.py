@@ -16,6 +16,7 @@ from app.modules.analytics_planner.ollama_client import (
     OllamaTimeoutError,
 )
 from app.modules.analytics_planner.llm_client import (
+    CHARS_PER_ESTIMATED_TOKEN,
     LLMConnectionError,
     LLMTimeoutError,
     create_llm_client,
@@ -23,6 +24,11 @@ from app.modules.analytics_planner.llm_client import (
 from app.modules.analytics_planner.plan_validator import (
     AnalyticalPlanValidationError,
     validate_analytical_plan,
+)
+from app.modules.analytics_planner.plan_sanitizer import (
+    augment_with_deterministic_charts,
+    deterministic_salvage_plan,
+    sanitize_plan,
 )
 from app.modules.analytics_planner.profile_preparation import (
     DatasetProfilePreparer,
@@ -38,6 +44,17 @@ from app.modules.analytics_planner.worksheet_classifier import classify_workshee
 
 
 logger = logging.getLogger(__name__)
+
+# Tokens reserved for the user-prompt framing text and preparation metadata
+# that surround the serialized profile.
+USER_PROMPT_FRAMING_TOKENS = 300
+
+# Smallest profile budget worth enforcing (matches DatasetProfilePreparer).
+MIN_PROFILE_CHARS = 1000
+
+# Cap on how much of an invalid previous response is echoed back in a repair
+# request; the echo is context-only and must not crowd out the profile.
+MAX_REPAIR_ECHO_CHARS = 2500
 
 
 class PlanGenerator(Protocol):
@@ -100,6 +117,48 @@ class AnalyticsPlanner:
         # Backward-compatible attribute for existing diagnostics/callers.
         self.ollama_client = self.plan_generator
 
+    def _context_budget(self) -> tuple[int, object] | None:
+        """Return (available prompt tokens, estimator) when the provider exposes them."""
+        available = getattr(self.plan_generator, "available_prompt_tokens", None)
+        estimate = getattr(self.plan_generator, "estimate_prompt_tokens", None)
+        if (
+            not isinstance(available, int)
+            or isinstance(available, bool)
+            or not callable(estimate)
+        ):
+            return None
+        return available, estimate
+
+    def _profile_char_budget(self) -> int | None:
+        """
+        Characters the serialized profile may use for this provider.
+
+        Derived from the provider's real input budget minus the fixed system
+        prompt and user-prompt framing, so the profile preparer's own
+        reduction ladder (drop category values, then compact columns) runs
+        before the provider rejects the request. Returns None when the
+        provider does not expose a budget or when too little room remains to
+        enforce a meaningful limit (the provider then reports the overflow).
+        """
+        budget = self._context_budget()
+        if budget is None:
+            return None
+        available, estimate = budget
+        fixed_tokens = estimate([
+            {"role": "system", "content": self.prompt_builder.build_system_prompt()},
+            {"role": "user", "content": ""},
+        ]) + USER_PROMPT_FRAMING_TOKENS
+        chars = int((available - fixed_tokens) * CHARS_PER_ESTIMATED_TOKEN)
+        return chars if chars >= MIN_PROFILE_CHARS else None
+
+    def _fits_context(self, messages: list[dict[str, str]]) -> bool:
+        """Whether ``messages`` fit the provider budget (True when unknown)."""
+        budget = self._context_budget()
+        if budget is None:
+            return True
+        available, estimate = budget
+        return estimate(messages) <= available
+
     def generate_plan(
         self,
         dataset_profile: DatasetProfile,
@@ -120,9 +179,16 @@ class AnalyticsPlanner:
 
         # Step 1: Prepare the Module 3 profile.
         try:
-            prepared_profile = self.profile_preparer.prepare(
-                dataset_profile
-            )
+            profile_char_budget = self._profile_char_budget()
+            if profile_char_budget is None:
+                prepared_profile = self.profile_preparer.prepare(
+                    dataset_profile
+                )
+            else:
+                prepared_profile = self.profile_preparer.prepare(
+                    dataset_profile,
+                    max_profile_chars=profile_char_budget,
+                )
 
         except ProfilePreparationError:
             logger.exception("Dataset profile preparation failed.")
@@ -175,11 +241,14 @@ class AnalyticsPlanner:
                     "requesting one corrected plan. Errors: %s",
                     exc.validation_errors,
                 )
+                echo = exc.generated_output or ""
+                if len(echo) > MAX_REPAIR_ECHO_CHARS:
+                    echo = echo[:MAX_REPAIR_ECHO_CHARS]
                 request_messages = [
                     *messages,
                     {
                         "role": "assistant",
-                        "content": exc.generated_output,
+                        "content": echo,
                     },
                     {
                         "role": "user",
@@ -197,7 +266,10 @@ class AnalyticsPlanner:
                             "and 'chart_type' (never 'type') for visualizations. "
                             "Every KPI operation_id must exactly match the id of a "
                             "scalar operation (sum, average, count, min, max, or "
-                            "distinct_count). Every visualization operation_id must "
+                            "distinct_count). If no scalar operation exists for a KPI, "
+                            "add one for the same worksheet and column and reference "
+                            "its id; never reference a group_by or other non-scalar "
+                            "operation from a KPI. Every visualization operation_id must "
                             "exactly match the id of a NON-SCALAR operation "
                             "(group_by, top_n, bottom_n, time_series, "
                             "percentage_of_total, or comparison). Never attach a "
@@ -213,6 +285,15 @@ class AnalyticsPlanner:
                         ),
                     },
                 ]
+                if not echo.strip() or not self._fits_context(request_messages):
+                    # Keep the correction request inside the context window by
+                    # dropping the echoed output; the validation errors in the
+                    # final message still identify what must be fixed.
+                    request_messages = [
+                        message
+                        for message in request_messages
+                        if message["role"] != "assistant"
+                    ]
                 continue
 
             except (OllamaTimeoutError, LLMTimeoutError) as exc:
@@ -270,6 +351,11 @@ class AnalyticsPlanner:
                     ]
                 })
 
+            # Repair fixable model mistakes (currency formats, incompatible
+            # chart types, operations that do not fit the data) instead of
+            # rejecting the whole plan. The result is still fully validated.
+            analytical_plan = sanitize_plan(analytical_plan, dataset_profile)
+
             # Small local models can return a syntactically valid narrative
             # plan while leaving all executable arrays empty. Do not send that
             # empty plan to Module 5 when the profile contains analyzable data.
@@ -294,6 +380,20 @@ class AnalyticsPlanner:
 
             except AnalyticalPlanValidationError as exc:
                 if attempt == 1:
+                    # Last resort before failing: a profile-grounded plan that
+                    # passes the same validation, so charts are still produced.
+                    salvaged = deterministic_salvage_plan(
+                        analytical_plan, dataset_profile,
+                    )
+                    if salvaged is not None:
+                        logger.warning(
+                            "LLM plan could not be validated after correction; "
+                            "using a deterministic profile-grounded plan. "
+                            "Reason: %s",
+                            exc,
+                        )
+                        analytical_plan = salvaged
+                        break
                     logger.exception(
                         "Generated analytics plan failed validation after correction."
                     )
@@ -324,8 +424,8 @@ class AnalyticsPlanner:
                             "values must be distinct observed categories from that "
                             "column. If no suitable category exists, omit comparison "
                             "and choose a valid supported operation instead. "
-                            "Keep the plan concise: at most 2 operations, 1 "
-                            "visualization, and 2 key questions. KPI operation_id "
+                            "Keep the plan concise: at most 6 operations, 4 "
+                            "visualizations, and 2 key questions. KPI operation_id "
                             "must reference a scalar operation id only "
                             "(sum/average/count/min/max/distinct_count). Visualization "
                             "operation_id must reference a non-scalar operation id "
@@ -343,6 +443,12 @@ class AnalyticsPlanner:
             raise AnalyticsPlanningError(
                 "The language model did not produce an analytical plan."
             )
+
+        # Broaden a thin dashboard with profile-grounded charts; the helper
+        # returns the plan unchanged unless the enlarged plan validates.
+        analytical_plan = augment_with_deterministic_charts(
+            analytical_plan, dataset_profile,
+        )
 
         logger.info(
             "Analytics plan generated and validated successfully."

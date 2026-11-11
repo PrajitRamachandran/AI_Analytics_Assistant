@@ -322,10 +322,28 @@ def test_validator_rejects_currency_code_without_unit_metadata():
         validate_analytical_plan(plan, make_profile())
 
 
-def test_planner_retries_once_after_dataset_validation_failure():
-    invalid = make_plan()
-    invalid.worksheet_analyses[0].summary = "Revenue is reported in $ values."
+def _fail_validation_times(monkeypatch, failures):
+    """Make the planner's dataset validation fail ``failures`` times."""
+    from app.modules.analytics_planner import analytics_planner as planner_module
+
+    real = planner_module.validate_analytical_plan
+    state = {"calls": 0}
+
+    def flaky(plan, profile):
+        state["calls"] += 1
+        if failures is None or state["calls"] <= failures:
+            raise AnalyticalPlanValidationError(
+                "Column 'region' must be a categorical or boolean column."
+            )
+        return real(plan, profile)
+
+    monkeypatch.setattr(planner_module, "validate_analytical_plan", flaky)
+    return state
+
+
+def test_planner_retries_once_after_dataset_validation_failure(monkeypatch):
     valid = make_plan()
+    _fail_validation_times(monkeypatch, failures=1)
 
     class CorrectingGenerator:
         def __init__(self):
@@ -333,13 +351,13 @@ def test_planner_retries_once_after_dataset_validation_failure():
 
         def generate_plan(self, messages):
             self.calls.append(messages)
-            return invalid if len(self.calls) == 1 else valid
+            return valid
 
     generator = CorrectingGenerator()
     planner = AnalyticsPlanner(plan_generator=generator)
     result = planner.generate_plan(make_profile())
 
-    assert result is valid
+    assert result.operations[0].id == "total_revenue"
     assert len(generator.calls) == 2
     assert "Validation error" in generator.calls[1][-1]["content"]
     assert "categorical or boolean" in generator.calls[1][-1]["content"]
@@ -349,9 +367,18 @@ def test_planner_retries_once_after_dataset_validation_failure():
     assert all(message["role"] != "assistant" for message in generator.calls[1])
 
 
-def test_planner_does_not_retry_more_than_once():
-    invalid = make_plan()
-    invalid.worksheet_analyses[0].summary = "Revenue is reported in $ values."
+def test_planner_does_not_retry_more_than_once(monkeypatch):
+    # Validation fails every time, including for the deterministic salvage
+    # plan, so the original error must still surface after exactly one retry.
+    from app.modules.analytics_planner import plan_sanitizer
+
+    _fail_validation_times(monkeypatch, failures=None)
+    monkeypatch.setattr(
+        plan_sanitizer, "validate_analytical_plan",
+        lambda plan, profile: (_ for _ in ()).throw(
+            AnalyticalPlanValidationError("still invalid")
+        ),
+    )
 
     class AlwaysInvalidGenerator:
         def __init__(self):
@@ -359,11 +386,11 @@ def test_planner_does_not_retry_more_than_once():
 
         def generate_plan(self, messages):
             self.calls += 1
-            return invalid
+            return make_plan()
 
     generator = AlwaysInvalidGenerator()
     planner = AnalyticsPlanner(plan_generator=generator)
-    with pytest.raises(AnalyticalPlanValidationError, match="currency marker"):
+    with pytest.raises(AnalyticalPlanValidationError, match="categorical or boolean"):
         planner.generate_plan(make_profile())
     assert generator.calls == 2
 
@@ -415,7 +442,7 @@ def test_planner_retries_once_after_provider_neutral_schema_validation_error():
     generator = CorrectingGenerator()
     result = AnalyticsPlanner(plan_generator=generator).generate_plan(make_profile())
 
-    assert result is valid
+    assert result.operations[0].id == "total_revenue"
     assert len(generator.calls) == 2
     retry_messages = generator.calls[1]
     assert retry_messages[-2] == {
@@ -555,3 +582,544 @@ def test_prepared_profile_exposes_worksheet_role_without_dropping_reference_shee
     assert prepared["worksheets"]["Sales"]["worksheet_role"] == "analytical"
     assert prepared["worksheets"]["Notes"]["worksheet_role"] == "insufficient"
     assert set(prepared["worksheets"]) == {"Sales", "Notes"}
+
+
+# ---------------------------------------------------------------------------
+# KPI -> scalar operation linkage
+# ---------------------------------------------------------------------------
+
+def _kpi_plan_payload(operations, kpis):
+    payload = make_plan().model_dump(mode="json")
+    payload["operations"] = operations
+    payload["kpis"] = kpis
+    return payload
+
+
+def _group_by_revenue(op_id="op_1", aggregations=None):
+    return {
+        "id": op_id, "operation_type": "group_by", "worksheet_name": "Sales",
+        "title": "Revenue by region", "description": "Revenue per region.",
+        "group_by_columns": ["region"],
+        "aggregations": aggregations or [
+            {"alias": "total_revenue", "function": "sum", "column": "revenue"},
+        ],
+    }
+
+
+def _kpi(kpi_id="kpi1", operation_id="op_1"):
+    return {
+        "id": kpi_id, "operation_id": operation_id, "label": "Total revenue",
+        "description": "Sum of revenue.", "format_hint": "number",
+        "priority": "high",
+    }
+
+
+def _profile_with_region() -> DatasetProfile:
+    data = make_profile().model_dump(mode="json")
+    sales = data["worksheets"]["Sales"]
+    sales["columns"].append({
+        "column_name": "region", "original_name": "Region",
+        "pandas_dtype": "object", "inferred_type": "categorical",
+        "semantic_role": "category", "non_null_count": 3,
+        "missing_value_count": 0, "blank_string_count": 0,
+        "missing_percentage": 0, "unique_value_count": 2,
+        "unique_value_percentage": 66.7,
+    })
+    sales["column_count"] = len(sales["columns"])
+    return DatasetProfile.model_validate(data)
+
+
+def test_kpi_on_single_metric_group_by_gets_explicit_scalar_operation():
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload([_group_by_revenue()], [_kpi()])
+    )
+
+    assert [op.operation_type for op in plan.operations] == ["group_by", "sum"]
+    derived = plan.operations[1]
+    assert plan.kpis[0].operation_id == derived.id == "kpi1_overall"
+    assert (derived.worksheet_name, derived.column) == ("Sales", "revenue")
+    assert derived.result_name == "total_revenue"
+
+    # The repaired plan is itself a valid plan (round-trips and passes the
+    # dataset validator), so downstream execution sees an ordinary scalar KPI.
+    WorkbookAnalyticsPlan.model_validate(plan.model_dump(mode="json"))
+    validate_analytical_plan(plan, _profile_with_region())
+
+
+def test_kpi_reuses_equivalent_existing_scalar_operation():
+    existing = {
+        "id": "total_revenue", "operation_type": "sum",
+        "worksheet_name": "Sales", "title": "Total revenue",
+        "description": "Sum revenue.", "result_name": "total_revenue",
+        "column": "revenue",
+    }
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload([_group_by_revenue(), existing], [_kpi()])
+    )
+
+    assert len(plan.operations) == 2
+    assert plan.kpis[0].operation_id == "total_revenue"
+
+
+def test_two_kpis_on_same_metric_share_one_derived_operation():
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload(
+            [_group_by_revenue()], [_kpi("kpi1"), _kpi("kpi2")],
+        )
+    )
+
+    assert len(plan.operations) == 2
+    assert plan.kpis[0].operation_id == plan.kpis[1].operation_id
+    validate_analytical_plan(plan, _profile_with_region())
+
+
+def test_kpi_on_time_series_uses_its_metric():
+    series = {
+        "id": "trend", "operation_type": "time_series",
+        "worksheet_name": "Sales", "title": "Trend", "description": "Trend.",
+        "date_column": "order_date", "interval": "month",
+        "metric": {"alias": "avg_revenue", "function": "average",
+                   "column": "revenue"},
+    }
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload([series], [_kpi(operation_id="trend")])
+    )
+
+    # The KPI label ("Total revenue") names the function, so it wins over the
+    # chart's own average metric; the column is the one the chart reports.
+    derived = plan.operations[-1]
+    assert derived.operation_type == "sum" and derived.column == "revenue"
+    assert plan.kpis[0].operation_id == derived.id
+
+
+def test_kpi_on_ambiguous_non_scalar_operation_is_still_rejected():
+    from pydantic import ValidationError
+
+    two_columns = _group_by_revenue(aggregations=[
+        {"alias": "total_revenue", "function": "sum", "column": "revenue"},
+        {"alias": "total_cost", "function": "sum", "column": "cost"},
+    ])
+    vague_kpi = dict(_kpi(), label="Headline figure")
+    with pytest.raises(
+        ValidationError,
+        match=r"KPI 'kpi1' must reference a scalar operation\.",
+    ):
+        WorkbookAnalyticsPlan.model_validate(
+            _kpi_plan_payload([two_columns], [vague_kpi])
+        )
+
+    two_regions = {
+        "id": "op_1", "operation_type": "comparison",
+        "worksheet_name": "Sales", "title": "Compare", "description": "Cmp.",
+        "category_column": "region", "baseline_value": "North",
+        "comparison_value": "South",
+        "metric": {"alias": "revenue_sum", "function": "sum",
+                   "column": "revenue"},
+    }
+    # No column and no function named by the KPI text, but a single metric:
+    # the comparison's measure is unambiguous, so this one is linked.
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload([two_regions], [vague_kpi])
+    )
+    assert plan.operations[-1].operation_type == "sum"
+
+
+def _payroll_plan(kpi_id, kpi_label, source):
+    return WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload(
+            [source],
+            [dict(_kpi(kpi_id, source["id"]), label=kpi_label)],
+        )
+    )
+
+
+def test_kpi_picks_measure_named_by_its_id_from_multi_metric_group_by():
+    source = _group_by_revenue(aggregations=[
+        {"alias": "avg_gross_salary", "function": "average",
+         "column": "gross_salary"},
+        {"alias": "avg_net_salary", "function": "average",
+         "column": "net_salary"},
+        {"alias": "headcount", "function": "count", "column": None},
+    ])
+    plan = _payroll_plan("kpi_avg_gross_salary", "Average gross salary", source)
+
+    derived = plan.operations[-1]
+    assert plan.kpis[0].operation_id == derived.id
+    assert (derived.operation_type, derived.column) == ("average", "gross_salary")
+
+
+def test_kpi_on_top_n_uses_function_and_column_from_kpi_text():
+    top_n = {
+        "id": "top_depts", "operation_type": "top_n",
+        "worksheet_name": "Sales", "title": "Top departments",
+        "description": "Top departments.", "group_by_column": "region",
+        "limit": 5,
+        "metric": {"alias": "total_gross_salary", "function": "sum",
+                   "column": "gross_salary"},
+    }
+    plan = _payroll_plan("kpi_avg_gross_salary", "Average gross salary", top_n)
+
+    derived = plan.operations[-1]
+    assert (derived.operation_type, derived.column) == ("average", "gross_salary")
+
+
+def test_kpi_on_percentage_of_total_derives_total_of_value_column():
+    pct = {
+        "id": "share", "operation_type": "percentage_of_total",
+        "worksheet_name": "Sales", "title": "Share", "description": "Share.",
+        "category_column": "region", "value_column": "revenue",
+    }
+    plan = _payroll_plan("kpi_total_revenue", "Total revenue", pct)
+
+    derived = plan.operations[-1]
+    assert (derived.operation_type, derived.column) == ("sum", "revenue")
+
+
+def test_kpi_repair_never_exceeds_operation_limit():
+    from pydantic import ValidationError
+
+    operations = [_group_by_revenue()] + [
+        {
+            "id": f"max_{i}", "operation_type": "max",
+            "worksheet_name": "Sales", "title": f"Max {i}",
+            "description": "Max.", "result_name": f"max_{i}",
+            "column": f"col_{i}",
+        }
+        for i in range(11)
+    ]
+    with pytest.raises(ValidationError, match="must reference a scalar"):
+        WorkbookAnalyticsPlan.model_validate(
+            _kpi_plan_payload(operations, [_kpi()])
+        )
+
+
+def test_kpi_on_scalar_operation_is_left_untouched():
+    plan = WorkbookAnalyticsPlan.model_validate(
+        _kpi_plan_payload(
+            [{
+                "id": "total_revenue", "operation_type": "sum",
+                "worksheet_name": "Sales", "title": "Total revenue",
+                "description": "Sum revenue.", "result_name": "total_revenue",
+                "column": "revenue",
+            }],
+            [_kpi(operation_id="total_revenue")],
+        )
+    )
+
+    assert len(plan.operations) == 1
+    assert plan.kpis[0].operation_id == "total_revenue"
+
+
+def test_ollama_client_accepts_kpi_linked_to_group_by_without_schema_error(monkeypatch):
+    payload = _kpi_plan_payload([_group_by_revenue()], [_kpi()])
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "done": True, "done_reason": "stop",
+                "message": {"content": json.dumps(payload)},
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "app.modules.analytics_planner.ollama_client.httpx.Client", FakeClient
+    )
+    plan = OllamaClient().generate_plan(
+        [{"role": "user", "content": "make a plan"}]
+    )
+
+    assert plan.kpis[0].operation_id == "kpi1_overall"
+
+
+def test_schema_correction_prompt_explains_how_to_link_kpis_to_scalars():
+    error = PlanSchemaValidationError(
+        "Invalid plan schema",
+        generated_output="{}",
+        validation_errors=[{
+            "type": "value_error", "loc": (),
+            "msg": "Value error, KPI 'kpi1' must reference a scalar operation.",
+        }],
+    )
+
+    class FailsOnceGenerator:
+        def __init__(self):
+            self.calls = []
+
+        def generate_plan(self, messages):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                raise error
+            return make_plan()
+
+    generator = FailsOnceGenerator()
+    AnalyticsPlanner(plan_generator=generator).generate_plan(make_profile())
+
+    retry = generator.calls[1][-1]["content"]
+    assert "KPI 'kpi1' must reference a scalar operation" in retry
+    assert "add one for the same worksheet and column" in retry
+
+
+# ---------------------------------------------------------------------------
+# Plan sanitizing, deterministic chart top-up and salvage
+# ---------------------------------------------------------------------------
+
+def _col(name, inferred, role, *, unique=4, stats=None):
+    column = {
+        "column_name": name, "original_name": name.replace("_", " ").title(),
+        "pandas_dtype": "object", "inferred_type": inferred,
+        "semantic_role": role, "non_null_count": 20,
+        "missing_value_count": 0, "blank_string_count": 0,
+        "missing_percentage": 0, "unique_value_count": unique,
+        "unique_value_percentage": unique * 5,
+    }
+    if stats:
+        column["numerical_statistics"] = stats
+    return column
+
+
+def payroll_profile() -> DatasetProfile:
+    stats = {"minimum": 10, "maximum": 90, "mean": 50, "median": 50,
+             "total": 1000, "standard_deviation": 5}
+    columns = [
+        _col("employee_id", "numerical", "identifier", unique=20),
+        _col("department", "categorical", "category", unique=4),
+        _col("region", "categorical", "category", unique=3),
+        _col("join_date", "date", "date", unique=15),
+        _col("gross_salary", "numerical", "amount", unique=18, stats=stats),
+    ]
+    return DatasetProfile.model_validate({
+        "filename": "payroll.xlsx", "total_worksheet_count": 1,
+        "successful_worksheet_count": 1, "failed_worksheet_count": 0,
+        "worksheet_errors": {},
+        "worksheets": {"Payroll": {
+            "worksheet_name": "Payroll", "row_count": 20,
+            "column_count": len(columns), "columns": columns,
+        }},
+    })
+
+
+def payroll_plan(*, operations, kpis=(), visualizations=()):
+    return WorkbookAnalyticsPlan.model_validate({
+        "plan_version": "1.0",
+        "workbook_summary": "Payroll of 20 employees, salary around $50.",
+        "business_context": {"domain": "HR", "dataset_purpose": "Payroll review.",
+                             "confidence": 0.6},
+        "worksheet_analyses": [{
+            "worksheet_name": "Payroll", "inferred_purpose": "Payroll records",
+            "summary": "Employees with gross salary in USD.",
+            "analysis_focus": ["Salary by department"],
+        }],
+        "operations": list(operations), "kpis": list(kpis),
+        "visualizations": list(visualizations),
+        "key_questions": ["Which department has the highest salary?"],
+        "limitations": [],
+    })
+
+
+def _payroll_ops():
+    return [
+        {"id": "avg_salary", "operation_type": "average",
+         "worksheet_name": "Payroll", "title": "Average salary",
+         "description": "Mean gross salary.", "result_name": "avg_salary",
+         "column": "gross_salary"},
+        {"id": "salary_by_dept", "operation_type": "group_by",
+         "worksheet_name": "Payroll", "title": "Salary by department",
+         "description": "Average salary per department.",
+         "group_by_columns": ["department"],
+         "aggregations": [{"alias": "avg_salary", "function": "average",
+                           "column": "gross_salary"}]},
+    ]
+
+
+def _payroll_kpi(**overrides):
+    kpi = {"id": "kpi_avg_gross_salary", "operation_id": "avg_salary",
+           "label": "Average gross salary", "description": "Mean salary in $.",
+           "format_hint": "currency", "priority": "high"}
+    kpi.update(overrides)
+    return kpi
+
+
+def _payroll_viz(viz_id="v1", operation_id="salary_by_dept", chart_type="bar"):
+    return {"id": viz_id, "operation_id": operation_id,
+            "chart_type": chart_type, "title": "Salary by department",
+            "description": "Average salary by department.", "priority": "high"}
+
+
+def test_sanitizer_replaces_currency_format_and_strips_unsupported_symbols():
+    from app.modules.analytics_planner.plan_sanitizer import sanitize_plan
+
+    plan = payroll_plan(operations=_payroll_ops(), kpis=[_payroll_kpi()])
+    cleaned = sanitize_plan(plan, payroll_profile())
+
+    assert cleaned.kpis[0].format_hint == "decimal"
+    assert "$" not in cleaned.kpis[0].description
+    assert "USD" not in cleaned.worksheet_analyses[0].summary
+    assert "$" not in cleaned.workbook_summary
+    assert plan.kpis[0].format_hint == "currency"  # input is not mutated
+    validate_analytical_plan(cleaned, payroll_profile())
+
+
+def test_sanitizer_drops_operations_that_do_not_fit_the_dataset():
+    from app.modules.analytics_planner.plan_sanitizer import sanitize_plan
+
+    bad_group = dict(_payroll_ops()[1], id="by_salary",
+                     group_by_columns=["gross_salary"])
+    missing_col = dict(_payroll_ops()[0], id="avg_bonus", column="bonus")
+    plan = payroll_plan(
+        operations=[*_payroll_ops(), bad_group, missing_col],
+        kpis=[_payroll_kpi(), _payroll_kpi(id="kpi_bonus", operation_id="avg_bonus")],
+        visualizations=[_payroll_viz(), _payroll_viz("v2", "by_salary")],
+    )
+    cleaned = sanitize_plan(plan, payroll_profile())
+
+    assert [op.id for op in cleaned.operations] == ["avg_salary", "salary_by_dept"]
+    assert [kpi.id for kpi in cleaned.kpis] == ["kpi_avg_gross_salary"]
+    assert [viz.id for viz in cleaned.visualizations] == ["v1"]
+    validate_analytical_plan(cleaned, payroll_profile())
+
+
+def test_sanitizer_repairs_incompatible_and_duplicate_charts():
+    from app.modules.analytics_planner.plan_sanitizer import sanitize_plan
+
+    plan = payroll_plan(
+        operations=_payroll_ops(),
+        visualizations=[
+            _payroll_viz("v1", chart_type="scatter"),   # -> bar
+            _payroll_viz("v2", chart_type="bar"),       # duplicate of v1
+            _payroll_viz("v3", chart_type="line"),      # -> bar, duplicate
+            _payroll_viz("v4", chart_type="pie"),
+        ],
+    )
+    cleaned = sanitize_plan(plan, payroll_profile())
+
+    assert [(v.id, v.chart_type) for v in cleaned.visualizations] == [
+        ("v1", "bar"), ("v4", "pie"),
+    ]
+    validate_analytical_plan(cleaned, payroll_profile())
+
+
+def test_sanitizer_drops_unsupported_correlation_questions():
+    from app.modules.analytics_planner.plan_sanitizer import sanitize_plan
+
+    plan = payroll_plan(operations=_payroll_ops())
+    plan.key_questions = ["Is salary correlated with tenure?", "Who earns most?"]
+    cleaned = sanitize_plan(plan, payroll_profile())
+
+    assert cleaned.key_questions == ["Who earns most?"]
+
+
+def test_augmentation_adds_multiple_valid_charts_to_a_thin_plan():
+    from app.modules.analytics_planner.plan_sanitizer import (
+        augment_with_deterministic_charts, sanitize_plan,
+    )
+
+    profile = payroll_profile()
+    plan = sanitize_plan(
+        payroll_plan(
+            operations=_payroll_ops(), kpis=[_payroll_kpi()],
+            visualizations=[_payroll_viz()],
+        ),
+        profile,
+    )
+
+    result = augment_with_deterministic_charts(plan, profile)
+
+    assert len(result.visualizations) >= 4
+    assert len({v.id for v in result.visualizations}) == len(result.visualizations)
+    assert result.visualizations[0].id == "v1"  # the model's own chart is kept
+    validate_analytical_plan(result, profile)
+
+
+def test_augmentation_leaves_plans_that_already_meet_the_target_unchanged():
+    from app.modules.analytics_planner.plan_sanitizer import (
+        augment_with_deterministic_charts, sanitize_plan,
+    )
+
+    profile = payroll_profile()
+    plan = sanitize_plan(
+        payroll_plan(operations=_payroll_ops(), visualizations=[_payroll_viz()]),
+        profile,
+    )
+    assert augment_with_deterministic_charts(plan, profile, 1) is plan
+
+
+class _OneShotGenerator:
+    def __init__(self, plan):
+        self.plan, self.calls = plan, 0
+
+    def generate_plan(self, messages):
+        self.calls += 1
+        return self.plan
+
+
+def test_planner_turns_currency_kpi_and_scatter_chart_into_valid_multi_chart_plan():
+    # Reproduces the reported failure: KPI 'kpi_avg_gross_salary' with a
+    # currency format on a profile that has no currency metadata.
+    profile = payroll_profile()
+    plan = payroll_plan(
+        operations=_payroll_ops(), kpis=[_payroll_kpi()],
+        visualizations=[_payroll_viz(chart_type="scatter")],
+    )
+    generator = _OneShotGenerator(plan)
+
+    result = AnalyticsPlanner(plan_generator=generator).generate_plan(profile)
+
+    assert generator.calls == 1            # no wasted correction round-trip
+    assert result.kpis[0].format_hint == "decimal"
+    assert len(result.visualizations) >= 4
+    assert {v.chart_type for v in result.visualizations} >= {"bar", "line"}
+    validate_analytical_plan(result, profile)
+
+
+def test_planner_uses_deterministic_plan_when_final_validation_still_fails(monkeypatch):
+    profile = payroll_profile()
+    state = _fail_validation_times(monkeypatch, failures=2)
+    generator = _OneShotGenerator(payroll_plan(operations=_payroll_ops()))
+
+    result = AnalyticsPlanner(plan_generator=generator).generate_plan(profile)
+
+    assert generator.calls == 2 and state["calls"] >= 2
+    assert any(op.id.startswith("fallback_") for op in result.operations)
+    assert result.visualizations
+    validate_analytical_plan(result, profile)
+
+
+def test_planner_output_executes_into_multiple_charts():
+    import pandas as pd
+
+    from app.modules.analytics_execution import execute_analytics_plan
+
+    profile = payroll_profile()
+    plan = payroll_plan(
+        operations=_payroll_ops(), kpis=[_payroll_kpi()],
+        visualizations=[_payroll_viz(chart_type="scatter")],
+    )
+    result = AnalyticsPlanner(plan_generator=_OneShotGenerator(plan)).generate_plan(profile)
+
+    frame = pd.DataFrame({
+        "employee_id": range(1, 9),
+        "department": ["HR", "IT", "HR", "Ops"] * 2,
+        "region": ["N", "S"] * 4,
+        "join_date": pd.date_range("2024-01-01", periods=8, freq="MS"),
+        "gross_salary": [10, 20, 30, 40, 50, 60, 70, 80],
+    })
+    execution = execute_analytics_plan({"Payroll": frame}, result)
+
+    assert len(execution["charts"]) >= 4
+    assert all(chart.get("data") or chart.get("points") or chart for chart in execution["charts"])
+    assert any(k["value"] == 45 for k in execution["kpis"])  # average salary

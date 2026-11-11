@@ -13,10 +13,15 @@ import httpx
 from pydantic import ValidationError
 
 from app.modules.analytics_planner.errors import PlanSchemaValidationError
+from app.modules.analytics_planner.llm_client import estimate_tokens
 from app.schemas.analytics_plan import WorkbookAnalyticsPlan
 
 logger = logging.getLogger(__name__)
-CHARS_PER_ESTIMATED_TOKEN = 3.2
+
+# Chat-template framing (role markers, separators) added per message, plus a
+# small fixed allowance for the generation prompt.
+MESSAGE_OVERHEAD_TOKENS = 8
+PROMPT_BASE_OVERHEAD_TOKENS = 16
 
 
 class OllamaClientError(Exception):
@@ -84,6 +89,41 @@ class OllamaClient:
         self.disable_thinking = bool(disable_thinking)
         self._output_schema = WorkbookAnalyticsPlan.model_json_schema()
 
+    # ------------------------------------------------------------------
+    # Context budgeting
+    # ------------------------------------------------------------------
+    # The JSON schema is sent in the request's ``format`` field. Ollama turns
+    # it into a sampling grammar that constrains generated tokens; it is not
+    # rendered into the chat prompt and therefore does not occupy context.
+    # Only the chat messages (plus template framing) count as prompt tokens.
+
+    @property
+    def effective_output_tokens(self) -> int:
+        """Output tokens reserved inside the context window."""
+        return min(self.max_output_tokens, max(256, self.context_length // 4))
+
+    @property
+    def safety_margin_tokens(self) -> int:
+        """Headroom for tokenizer variance in the character-based estimate."""
+        return max(128, math.ceil(self.context_length * 0.05))
+
+    @property
+    def available_prompt_tokens(self) -> int:
+        """Prompt tokens that fit after reserving output and safety margin."""
+        return (
+            self.context_length
+            - self.effective_output_tokens
+            - self.safety_margin_tokens
+        )
+
+    @staticmethod
+    def estimate_prompt_tokens(messages: list[dict[str, str]]) -> int:
+        """Estimate the prompt tokens consumed by ``messages``."""
+        return PROMPT_BASE_OVERHEAD_TOKENS + sum(
+            estimate_tokens(message["content"]) + MESSAGE_OVERHEAD_TOKENS
+            for message in messages
+        )
+
     def _http_timeout(self) -> httpx.Timeout:
         """Use a short connection timeout and a longer inference read timeout."""
         return httpx.Timeout(
@@ -110,9 +150,7 @@ class OllamaClient:
             ):
                 raise ValueError("Invalid chat message structure.")
 
-        effective_output_tokens = min(
-            self.max_output_tokens, max(256, self.context_length // 4)
-        )
+        effective_output_tokens = self.effective_output_tokens
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -131,36 +169,32 @@ class OllamaClient:
         }
 
         message_characters = sum(len(message["content"]) for message in messages)
-        schema_characters = len(json.dumps(
-            self._output_schema, ensure_ascii=False, separators=(",", ":")
-        ))
-        estimated_prompt_tokens = math.ceil(
-            (message_characters + schema_characters) / CHARS_PER_ESTIMATED_TOKEN
-        )
-        safety_margin_tokens = max(128, math.ceil(self.context_length * 0.05))
-        available_prompt_tokens = (
-            self.context_length - effective_output_tokens - safety_margin_tokens
-        )
+        estimated_prompt_tokens = self.estimate_prompt_tokens(messages)
+        safety_margin_tokens = self.safety_margin_tokens
+        available_prompt_tokens = self.available_prompt_tokens
         if estimated_prompt_tokens > available_prompt_tokens:
             raise OllamaResponseError(
                 "The analytics prompt is too large for the configured Ollama context: "
-                f"estimated input (messages + JSON schema) is about "
+                f"estimated input (chat messages) is about "
                 f"{estimated_prompt_tokens} tokens; available input budget is "
-                f"{available_prompt_tokens} tokens after reserving "
-                f"{effective_output_tokens} output tokens and "
-                f"{safety_margin_tokens} safety tokens. Reduce the prepared "
-                "workbook profile; increasing context also increases memory use."
+                f"{available_prompt_tokens} tokens (context {self.context_length} "
+                f"minus {effective_output_tokens} reserved output tokens and "
+                f"{safety_margin_tokens} safety tokens). Reduce the prepared "
+                "workbook profile or raise OLLAMA_CONTEXT_LENGTH; a larger "
+                "context also increases memory use. Verify that no process-level "
+                "OLLAMA_* environment variable is overriding the .env values."
             )
 
         logger.info(
             "Starting Ollama analytics inference: model=%s message_count=%d "
-            "message_characters=%d schema_characters=%d estimated_prompt_tokens=%d "
-            "context_length=%d output_tokens=%d safety_margin_tokens=%d timeout_seconds=%.1f",
+            "message_characters=%d estimated_prompt_tokens=%d "
+            "available_prompt_tokens=%d context_length=%d output_tokens=%d "
+            "safety_margin_tokens=%d timeout_seconds=%.1f",
             self.model,
             len(messages),
             message_characters,
-            schema_characters,
             estimated_prompt_tokens,
+            available_prompt_tokens,
             self.context_length,
             effective_output_tokens,
             safety_margin_tokens,
@@ -276,6 +310,9 @@ class OllamaClient:
                 validation_errors=error_details,
             ) from exc
 
+        self._log_token_calibration(
+            response_data, estimated_prompt_tokens, available_prompt_tokens
+        )
         logger.info(
             "Ollama analytics plan generated: model=%s elapsed_seconds=%.1f "
             "prompt_tokens=%s output_tokens=%s done_reason=%s",
@@ -286,6 +323,31 @@ class OllamaClient:
             response_data.get("done_reason", "unknown"),
         )
         return plan
+
+    def _log_token_calibration(
+        self,
+        response_data: dict[str, Any],
+        estimated_prompt_tokens: int,
+        available_prompt_tokens: int,
+    ) -> None:
+        """Compare the character-based estimate with Ollama's exact count."""
+        actual = response_data.get("prompt_eval_count")
+        if not isinstance(actual, int) or actual <= 0:
+            return
+        logger.info(
+            "Ollama prompt token calibration: estimated=%d actual=%d budget=%d",
+            estimated_prompt_tokens,
+            actual,
+            available_prompt_tokens,
+        )
+        if actual > available_prompt_tokens:
+            logger.warning(
+                "Actual prompt tokens (%d) exceeded the input budget (%d); the "
+                "character-based estimate under-counts for this model's tokenizer. "
+                "Lower the profile size or raise OLLAMA_CONTEXT_LENGTH.",
+                actual,
+                available_prompt_tokens,
+            )
 
     def check_connection(self) -> bool:
         """Return whether the Ollama tags endpoint is reachable."""

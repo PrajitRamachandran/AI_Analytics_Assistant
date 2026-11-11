@@ -13,6 +13,7 @@ actual Module 3 DatasetProfile.
 from __future__ import annotations
 
 import math
+import re
 
 from typing import Annotated, Any, Literal, Optional, Union
 
@@ -593,6 +594,164 @@ class VisualizationRecommendation(AnalyticsPlanModel):
 
 
 # ============================================================
+# KPI -> SCALAR OPERATION DERIVATION
+# ============================================================
+
+_SCALAR_OPERATION_CLASSES: dict[str, type[ScalarOperation]] = {
+    "sum": SumOperation,
+    "average": AverageOperation,
+    "count": CountOperation,
+    "min": MinOperation,
+    "max": MaxOperation,
+    "distinct_count": DistinctCountOperation,
+}
+
+# Maximum number of operations a plan may contain (WorkbookAnalyticsPlan).
+_MAX_PLAN_OPERATIONS = 12
+
+
+_FUNCTION_HINTS: dict[str, str] = {
+    "avg": "average", "average": "average", "mean": "average",
+    "total": "sum", "sum": "sum",
+    "min": "min", "minimum": "min", "lowest": "min",
+    "max": "max", "maximum": "max", "highest": "max",
+    "count": "count",
+    "distinct": "distinct_count", "unique": "distinct_count",
+}
+
+
+def _candidate_metrics(operation: Any) -> list[MetricAggregation]:
+    """Return every measure a non-scalar operation reports."""
+    if isinstance(operation, GroupByOperation):
+        return list(operation.aggregations)
+
+    if isinstance(
+        operation, (TopNOperation, BottomNOperation, TimeSeriesOperation),
+    ) or isinstance(operation, ComparisonOperation):
+        return [operation.metric]
+
+    if isinstance(operation, PercentageOfTotalOperation):
+        return [MetricAggregation(
+            alias=operation.result_name,
+            function="sum",
+            column=operation.value_column,
+        )]
+
+    return []
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _select_kpi_metric(
+    candidates: list[MetricAggregation],
+    kpi: "KPIRecommendation",
+) -> Optional[tuple[str, Optional[str], str]]:
+    """
+    Choose (function, column, result_name) for a KPI from the measures of
+    the operation it references, using only the KPI's own id and label.
+
+    Returns None when the KPI text does not identify a single measure.
+    """
+    if not candidates:
+        return None
+
+    text = f"{kpi.id} {kpi.label}"
+    squashed = _squash(text)
+
+    # 1. A reported measure whose alias is named by the KPI wins outright.
+    aliased = [c for c in candidates if _squash(c.alias) and _squash(c.alias) in squashed]
+    if len({(c.function, c.column) for c in aliased}) == 1:
+        c = aliased[0]
+        return c.function, c.column, c.alias
+
+    # 2. Column: a column named by the KPI, else the only column reported.
+    columns = {c.column for c in candidates if c.column}
+    named = {col for col in columns if _squash(col) in squashed}
+
+    if len(named) == 1:
+        column: Optional[str] = next(iter(named))
+    elif not named and len(columns) == 1:
+        column = next(iter(columns))
+    elif not columns:
+        column = None
+    else:
+        return None
+
+    matching = [c for c in candidates if c.column == column]
+
+    # 3. Function: one stated by the KPI (when it can apply), else the
+    #    function of the single matching measure.
+    tokens = re.findall(r"[a-z]+", text.lower())
+    hinted = {_FUNCTION_HINTS[t] for t in tokens if t in _FUNCTION_HINTS}
+    function: Optional[str] = None
+
+    if len(hinted) == 1:
+        hint = next(iter(hinted))
+        if column is not None or hint == "count":
+            function = hint
+
+    if function is None:
+        functions = {c.function for c in matching}
+        if len(functions) != 1:
+            return None
+        function = next(iter(functions))
+
+    for c in matching:
+        if c.function == function:
+            return function, column, c.alias
+
+    return function, column, f"{function}_{column or 'records'}"[:80]
+
+
+def _derive_scalar_operation(
+    source: Any,
+    kpi: "KPIRecommendation",
+    taken_ids: set[str],
+) -> Optional[ScalarOperation]:
+    """
+    Build the explicit scalar operation equivalent to a KPI's measure.
+
+    The result is the chosen aggregation (function and column) applied to the
+    whole worksheet, so it is computed deterministically by Module 5 like any
+    other scalar operation and is still validated against the dataset profile.
+    """
+    selected = _select_kpi_metric(_candidate_metrics(source), kpi)
+
+    if selected is None:
+        return None
+
+    function, column, result_name = selected
+
+    if function != "count" and column is None:
+        return None
+
+    base = f"{kpi.id}_overall"[:56]
+    operation_id = base
+    suffix = 2
+
+    while operation_id in taken_ids:
+        operation_id = f"{base}_{suffix}"
+        suffix += 1
+
+    fields: dict[str, Any] = {
+        "id": operation_id,
+        "operation_type": function,
+        "worksheet_name": source.worksheet_name,
+        "title": kpi.label,
+        "description": (
+            f"Overall {function} across the worksheet, "
+            f"derived from the measures of operation '{source.id}'."
+        ),
+        "result_name": result_name,
+        "column": column,
+    }
+
+    return _SCALAR_OPERATION_CLASSES[function](**fields)
+
+
+# ============================================================
 # COMPLETE WORKBOOK-LEVEL ANALYTICAL PLAN
 # ============================================================
 
@@ -645,6 +804,33 @@ class WorkbookAnalyticsPlan(AnalyticsPlanModel):
         default_factory=list,
         max_length=15,
     )
+
+    def _scalar_for_kpi(
+        self,
+        source: Any,
+        kpi: KPIRecommendation,
+        scalar_ops: list[Any],
+    ) -> Optional[ScalarOperation]:
+        """Reuse or append the scalar operation backing a KPI measure."""
+        candidate = _derive_scalar_operation(
+            source, kpi, {op.id for op in self.operations},
+        )
+
+        if candidate is None:
+            return None
+
+        for existing in scalar_ops:
+            if (
+                existing.worksheet_name == candidate.worksheet_name
+                and existing.operation_type == candidate.operation_type
+                and getattr(existing, "column", None) == candidate.column
+            ):
+                return existing
+
+        self.operations.append(candidate)
+        scalar_ops.append(candidate)
+
+        return candidate
 
     # --------------------------------------------------------
     # CROSS-REFERENCE VALIDATION
@@ -737,9 +923,23 @@ class WorkbookAnalyticsPlan(AnalyticsPlanModel):
                     )
 
             if operation.operation_type not in scalar_operation_types:
-                raise ValueError(
-                    f"KPI '{kpi.id}' must reference a scalar operation."
-                )
+                # A KPI must show one number. When it points at a grouped or
+                # trend result with a single unambiguous measure, link it to
+                # an explicit scalar operation over that same measure instead
+                # of rejecting the plan. Anything ambiguous still fails.
+                derived = None
+
+                if len(self.operations) < _MAX_PLAN_OPERATIONS:
+                    derived = self._scalar_for_kpi(
+                        operation, kpi, scalar_ops,
+                    )
+
+                if derived is None:
+                    raise ValueError(
+                        f"KPI '{kpi.id}' must reference a scalar operation."
+                    )
+
+                kpi.operation_id = derived.id
 
         # Validate visualization references.
         visualization_ids = [

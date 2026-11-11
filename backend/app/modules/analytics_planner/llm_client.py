@@ -12,6 +12,7 @@ variable (default: ``ollama``).
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Callable, Optional, Protocol, runtime_checkable
 
@@ -88,6 +89,24 @@ class PlanLLMClient(Protocol):
 
     def check_connection(self) -> bool:
         ...
+
+
+# ============================================================
+# SHARED TOKEN ESTIMATION
+# ============================================================
+
+# Rough characters-per-token heuristic for English/JSON prompts. This is a
+# budgeting estimate, not a tokenizer; providers report exact counts.
+CHARS_PER_ESTIMATED_TOKEN = 3.2
+
+
+def estimate_tokens(text: str) -> int:
+    """Return a conservative integer token estimate for ``text``."""
+
+    if not text:
+        return 0
+
+    return math.ceil(len(text) / CHARS_PER_ESTIMATED_TOKEN)
 
 
 # ============================================================

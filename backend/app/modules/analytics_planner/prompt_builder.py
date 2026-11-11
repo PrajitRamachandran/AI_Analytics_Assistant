@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.schemas.analytics_plan import WorkbookAnalyticsPlan
-
 
 class PromptBuilderError(Exception):
     """Raised when an analytics-planning prompt cannot be constructed."""
@@ -24,121 +22,104 @@ GROUNDING AND WORKSHEET SELECTION
   column_name is the normalized execution identifier; original_name is display metadata only.
 - Analyse every worksheet exactly once in worksheet_analyses, but create
   operations only for worksheets whose worksheet_role is "analytical".
-- Do not create business aggregations on "reference", "empty", or
-  "insufficient" worksheets. Reference/documentation sheets may be described
-  in worksheet_analyses but must not be treated as transactional datasets.
-- Operations must stay within one worksheet; never infer joins.
+  "reference", "empty", and "insufficient" worksheets may be described but get
+  no business aggregations and are never treated as transactional datasets.
+- Operations stay within one worksheet; never infer joins.
 - Never invent worksheets, columns, category values, units, currencies,
   relationships, statistics, dates, findings, or business context.
 - The profile has no explicit unit metadata: NEVER add currency symbols/codes
   or request currency formatting. Treat measures as unitless unless the
-  normalized column metadata explicitly establishes a unit in its name.
+  normalized column name explicitly establishes a unit.
 - Missing, omitted, or truncated values are unknown, not zero. Do not infer
   causes, correlations, anomalies, forecasts, or unsupported trends.
 - Correlation analysis is not supported in V1.
 
-EXACT OUTPUT CONTRACT — FOLLOW THIS BEFORE GENERATING JSON
-- Return one JSON object. Do not add a wrapper such as {"workbook": ...}.
-- The root object has these exact keys and no others:
-  plan_version, workbook_summary, business_context, worksheet_analyses,
-  operations, kpis, visualizations, key_questions, limitations.
-- plan_version must be the string "1.0".
-- business_context has domain, dataset_purpose, confidence. confidence is a
-  JSON number between 0 and 1, never a quoted string.
-- Every worksheet_analyses item has worksheet_name, inferred_purpose,
-  summary, analysis_focus. analysis_focus is always an array of strings, even
-  when it contains only one item.
-- Every operation has id, operation_type, worksheet_name, title, description,
-  plus the fields required by that operation_type. The operation_type field is
-  mandatory; it is the discriminator. Never omit it.
-- Supported scalar operation_type values are sum, average, count, min, max,
-  distinct_count. These produce one scalar result and are suitable for KPIs.
-- Supported non-scalar operation_type values are group_by, top_n, bottom_n,
-  time_series, percentage_of_total, comparison. These produce category/time
-  series results and are suitable for visualizations.
-- A sum/average/min/max/distinct_count operation also requires result_name
-  and column. A count operation requires result_name and may omit column.
-- A group_by operation requires group_by_columns and aggregations. Each
-  aggregation has alias and function; it also requires column unless function
-  is count. Use only supported aggregation functions: sum, average, count,
-  min, max, distinct_count.
-- A top_n or bottom_n operation requires group_by_column, metric, and limit.
-  A time_series operation requires date_column, interval, and metric.
-  A percentage_of_total operation requires category_column and value_column.
-  A comparison operation requires category_column, two distinct observed
-  non-null values (baseline_value and comparison_value), and metric.
-- Every KPI has id, operation_id, label, description, format_hint, priority.
-  Use the key "label", never "name". Its operation_id MUST exactly equal the
-  id of an existing scalar operation.
-- Every visualization has id, operation_id, chart_type, title, description,
-  priority. Use "chart_type", never "type". Its operation_id MUST exactly
-  equal the id of an existing NON-SCALAR operation. Never attach a chart to
-  sum, average, count, min, max, or distinct_count. If no non-scalar operation
-  exists, return an empty visualizations array.
-- operation_id is always an operation's id, not its operation_type or result_name.
-- key_questions is an array of plain strings, not objects.
-- Do not include a "workbook" root field or any unlisted properties.
+OUTPUT CONTRACT
+- Return one JSON object (no wrapper such as {"workbook": ...}) with exactly
+  these root keys: plan_version, workbook_summary, business_context,
+  worksheet_analyses, operations, kpis, visualizations, key_questions,
+  limitations.
+- plan_version is the string "1.0". key_questions is an array of plain strings.
+- business_context: domain, dataset_purpose, confidence (a JSON number from 0
+  to 1, never a quoted string).
+- worksheet_analyses item: worksheet_name, inferred_purpose, summary,
+  analysis_focus (always an array of strings, even for one item).
+- Every operation has id, operation_type (mandatory discriminator, never
+  omitted), worksheet_name, title, description, plus the fields its type needs:
+  * Scalar types (one value; used for KPIs): sum, average, min, max,
+    distinct_count need result_name and column; count needs result_name and
+    may omit column.
+  * Non-scalar types (category/time series; used for charts):
+    group_by needs group_by_columns and aggregations (each has alias and
+    function: sum, average, count, min, max, or distinct_count, plus column
+    unless function is count);
+    top_n/bottom_n need group_by_column, metric, limit;
+    time_series needs date_column, interval, metric;
+    percentage_of_total needs category_column, value_column;
+    comparison needs category_column, metric, and two distinct observed
+    non-null values (baseline_value, comparison_value).
+- Every KPI has id, operation_id, label (never "name"), description,
+  format_hint (number, integer, decimal, or percentage; never currency), priority. Its operation_id MUST equal the id of an existing
+  SCALAR operation. Give each KPI its own scalar operation (for example a sum
+  of the measure); never point a KPI at a group_by or other non-scalar id.
+- Every visualization has id, operation_id, chart_type (never "type"), title,
+  description, priority. Its operation_id MUST equal the id of an existing
+  NON-SCALAR operation; never chart a scalar operation. If no non-scalar
+  operation exists, return an empty visualizations array.
+- operation_id is always an operation's id, never its operation_type or
+  result_name.
 
 FEASIBILITY AND GROUNDING
 - Use inferred_type and semantic_role to establish column compatibility.
-- Sum/average/min/max require numerical measures. Never aggregate identifiers.
-- Count may omit its column to count rows. Distinct-count may use a suitable
-  profiled column.
+  Sum/average/min/max need numerical measures; never aggregate identifiers.
+  Distinct-count may use any suitable profiled column.
 - Grouping dimensions must be categorical or boolean. NEVER use a numerical, date, identifier, free-text, notes, or high-cardinality columns as grouping dimensions. Use a low/medium-cardinality category supported by the profile.
 - Never group by raw dates; use time_series with an explicit interval.
 - Comparison requires two distinct observed non-null values explicitly listed
   in categorical frequencies. If those values are unavailable, do not compare.
-- Use normalized column_name as source columns. Never invent columns/values.
 
 PLAN REQUIREMENTS
-- If at least one analytical worksheet has a usable numerical measure, create
-  at least one scalar operation and a linked KPI.
-- If an analytical worksheet has a usable low/medium-cardinality categorical
-  dimension, create a group_by operation and attach a compatible bar chart.
-- If no numerical measure exists but rows can be counted, a row-count KPI is
-  acceptable. If no suitable category exists, do not force a chart.
+- If an analytical worksheet has a usable numerical measure, create at least
+  one scalar operation and a linked KPI. If it has a usable low/medium-
+  cardinality category, create a group_by operation with a compatible bar
+  chart. If only rows can be counted, a row-count KPI is acceptable. Do not
+  force a chart when no suitable category exists.
 - Do not return empty operations/kpis/visualizations when the profile contains
-  usable analytical data. If a worksheet is only reference material, an empty
-  operation list is acceptable.
+  usable analytical data; a reference-only workbook may have no operations.
+- Build a useful dashboard, not just one chart. When the profile supports it,
+  target 4-8 operations and 3-6 visualizations (targets, not quotas).
+  Never exceed 8 operations, 8 visualizations, 2 key_questions, or 4 KPIs.
+- Prefer one meaningful aggregation per group_by operation; use separate
+  operations for genuinely different measures. Cover distinct angles when
+  supported (category comparison, ranking, time trend, composition, detail
+  table) and avoid near-identical charts.
 - Every key question must be answerable by an operation in the plan.
-- Build a useful workbook-level dashboard, not just one chart. When the
-  profile supports it, target 4–8 analytical operations and 3–6 visualizations.
-  These are targets, not quotas: return fewer when the data cannot support them.
-- Never exceed 8 operations, 8 visualizations, 2 key_questions, or 4 KPIs.
-- Prefer one meaningful aggregation per group_by operation. Create separate
-  operations for genuinely different measures rather than combining unrelated
-  metrics into one chart.
-- Cover distinct analytical angles when supported: category comparison,
-  ranking, time trend, percentage composition, and detailed result table.
-  Do not create several near-identical charts just to increase chart count.
-- Choose chart types according to the operation and data:
-  * group_by: bar; pie/donut only for a small number of non-negative categories
-    where part-to-whole composition is meaningful; table when detail is useful.
-  * top_n/bottom_n: bar; table may also be useful for exact ranked values.
-  * time_series: line or area (choose one, not both for the same series).
-  * percentage_of_total: pie/donut for a small number of non-negative shares,
-    otherwise bar; table may be useful for exact percentages.
-  * comparison: bar or table.
-- Every visualization references a non-scalar operation by its exact operation
-  id. Multiple chart recommendations may reference the same operation only
-  when they provide genuinely different, useful views of its results.
-- KPIs reference scalar operations only. Never recommend scatter in V1.
-- Keep every visualization description concise (one or two short sentences),
-  explaining what is being compared or trended without inventing findings.
+- Chart types: group_by: bar (pie/donut only for few non-negative categories;
+  table for detail). top_n/bottom_n: bar (table optional). time_series: line
+  or area, not both for one series. percentage_of_total: pie/donut for few
+  non-negative shares, else bar (table optional). comparison: bar or table.
+  Several charts may share one operation only as genuinely different views.
+  Never recommend scatter in V1.
+- Visualization descriptions: one or two short sentences saying what is
+  compared or trended, without inventing findings.
 
 OUTPUT
-- Return exactly one complete JSON object matching the output contract above.
+- Return exactly one complete JSON object matching the contract above.
 - No Markdown, commentary, explanations, extra fields, or executable code.
 """
 
 
+# Preparation-metadata keys used for budgeting only; never shown to the model.
+_BUDGET_ONLY_METADATA_KEYS = frozenset({
+    "filename",
+    "profile_characters",
+    "estimated_profile_tokens",
+    "max_profile_characters",
+})
+
+
 class AnalyticsPromptBuilder:
     """Construct prompts for generating a workbook-level analytics plan."""
-
-    def __init__(self) -> None:
-        # Retained for provider adapters that use the Pydantic schema as a
-        # structured-output constraint (Groq and Ollama).
-        self._schema = WorkbookAnalyticsPlan.model_json_schema()
 
     def build_system_prompt(self) -> str:
         """Return explicit provider-independent output and planning rules."""
@@ -182,6 +163,14 @@ class AnalyticsPromptBuilder:
                 raise PromptBuilderError(
                     "Profile preparation metadata must be a dictionary."
                 )
+            # Size/budget bookkeeping is meaningless to the model and the
+            # filename is already in the profile; send only what explains
+            # intentionally omitted optional fields.
+            metadata = {
+                key: value
+                for key, value in metadata.items()
+                if key not in _BUDGET_ONLY_METADATA_KEYS
+            }
             metadata_json = json.dumps(
                 metadata,
                 ensure_ascii=False,

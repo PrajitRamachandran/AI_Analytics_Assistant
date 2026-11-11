@@ -32,6 +32,10 @@ from app.schemas.data_understanding import (
     DatasetProfile,
     WorksheetProfile,
 )
+from app.modules.analytics_planner.llm_client import (
+    CHARS_PER_ESTIMATED_TOKEN,  # re-exported for backward compatibility
+    estimate_tokens,
+)
 from app.modules.analytics_planner.worksheet_classifier import classify_worksheet
 
 
@@ -39,19 +43,15 @@ from app.modules.analytics_planner.worksheet_classifier import classify_workshee
 # DEFAULT CONFIGURATION
 # ============================================================
 
-# Keep the profile comfortably within the 8K-token V1 context budget after
-# accounting for the system prompt, message framing, JSON schema, and
-# generated output.  The Ollama client validates the total token budget
-# independently, so this limit is a profiling-layer safety net.
+# Upper bound for the serialized profile. The planner lowers this per request
+# (see ``prepare(max_profile_chars=...)``) so that the system prompt, message
+# framing, and reserved output still fit the provider's context window; the
+# provider client validates the total token budget independently.
 DEFAULT_MAX_PROFILE_CHARS = 12000
 
 DEFAULT_MAX_SAMPLE_VALUES = 3
 
 DEFAULT_MAX_CATEGORY_VALUES = 5
-
-# Approximate character-to-token conversion.
-# This is a rough budgeting heuristic, not an exact tokenizer.
-CHARS_PER_ESTIMATED_TOKEN = 3.2
 
 
 # ============================================================
@@ -113,9 +113,13 @@ class DatasetProfilePreparer:
     def prepare(
         self,
         dataset_profile: DatasetProfile,
+        max_profile_chars: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Prepare a DatasetProfile for LLM consumption.
+
+        ``max_profile_chars`` optionally tightens the size limit for this
+        call only (it never raises it above the configured limit).
 
         Returns a JSON-compatible dictionary containing:
 
@@ -140,6 +144,14 @@ class DatasetProfilePreparer:
                 "The dataset profile contains no successfully profiled worksheets."
             )
 
+        limit = self.max_profile_chars
+        if max_profile_chars is not None:
+            if max_profile_chars < 1000:
+                raise ValueError(
+                    "max_profile_chars must be at least 1000."
+                )
+            limit = min(limit, max_profile_chars)
+
         warnings: list[str] = []
 
         prepared_profile = self._build_profile(
@@ -152,7 +164,7 @@ class DatasetProfilePreparer:
 
         # First reduction: remove optional raw sample values.
         if (
-            len(profile_json) > self.max_profile_chars
+            len(profile_json) > limit
             and self.include_sample_values
         ):
 
@@ -169,7 +181,7 @@ class DatasetProfilePreparer:
             )
 
         # Second reduction: reduce optional category frequencies.
-        if len(profile_json) > self.max_profile_chars:
+        if len(profile_json) > limit:
 
             prepared_profile = self._build_profile(
                 dataset_profile=dataset_profile,
@@ -187,7 +199,7 @@ class DatasetProfilePreparer:
         # Third reduction: compact column metadata by stripping
         # numerical/date statistics from low-priority columns (those
         # already profiled as identifiers or with few non-null values).
-        if len(profile_json) > self.max_profile_chars:
+        if len(profile_json) > limit:
 
             prepared_profile = self._compact_columns(prepared_profile)
             profile_json = self._serialize(prepared_profile)
@@ -197,21 +209,21 @@ class DatasetProfilePreparer:
             )
 
         # Never silently drop worksheets or columns.
-        if len(profile_json) > self.max_profile_chars:
+        if len(profile_json) > limit:
 
             raise ProfilePreparationError(
                 "The prepared dataset profile exceeds the configured "
-                f"limit of {self.max_profile_chars:,} characters. "
+                f"limit of {limit:,} characters. "
                 f"Current size: {len(profile_json):,} characters. "
                 "The workbook contains too much profiling metadata "
                 "for the current LLM input budget. Consider increasing "
                 "the profile limit, reducing the number of columns, "
-                "or implementing hierarchical planning."
+                "or implementing hierarchical planning. When the limit was "
+                "derived from the model context window, raising "
+                "OLLAMA_CONTEXT_LENGTH also raises it."
             )
 
-        estimated_tokens = (
-            len(profile_json) + CHARS_PER_ESTIMATED_TOKEN - 1
-        ) // CHARS_PER_ESTIMATED_TOKEN
+        estimated_tokens = estimate_tokens(profile_json)
 
         if dataset_profile.failed_worksheet_count > 0:
 
@@ -241,7 +253,7 @@ class DatasetProfilePreparer:
                 ),
                 "profile_characters": len(profile_json),
                 "estimated_profile_tokens": estimated_tokens,
-                "max_profile_characters": self.max_profile_chars,
+                "max_profile_characters": limit,
                 "sample_values_included": (
                     self.include_sample_values
                     and "Sample values were excluded to reduce profile size."

@@ -1,3 +1,5 @@
+import { useMemo, useState } from "react";
+import { filterCharts } from "./analyticsUtils";
 import "./AnalyticsDashboard.css";
 
 function formatNumber(value) {
@@ -167,6 +169,12 @@ function ChartRenderer({ chart }) {
 }
 
 export default function AnalyticsDashboard({ result }) {
+  const [chartQuery, setChartQuery] = useState("");
+  const [chartType, setChartType] = useState("all");
+  const charts = useMemo(
+    () => filterCharts(result?.charts || [], chartQuery, chartType),
+    [result?.charts, chartQuery, chartType],
+  );
   if (!result) return null;
 
   return (
@@ -190,8 +198,30 @@ export default function AnalyticsDashboard({ result }) {
       </div>
 
       {Array.isArray(result.charts) && result.charts.length > 0 ? (
-        <div className="analytics-chart-grid">
-          {result.charts.map((chart) => (
+        <>
+          <div className="analytics-chart-toolbar">
+            <div>
+              <h3>Charts & insights</h3>
+              <p>{charts.length} of {result.charts.length} visualisations</p>
+            </div>
+            <div className="analytics-chart-filters">
+              <label className="analytics-search">
+                <span className="sr-only">Search charts</span>
+                <input value={chartQuery} onChange={(event) => setChartQuery(event.target.value)} placeholder="Search charts..." />
+              </label>
+              <label className="analytics-type-filter">
+                <span className="sr-only">Filter chart type</span>
+                <select value={chartType} onChange={(event) => setChartType(event.target.value)}>
+                  <option value="all">All chart types</option>
+                  <option value="bar">Bar</option><option value="line">Line</option>
+                  <option value="area">Area</option><option value="pie">Pie</option>
+                  <option value="donut">Donut</option><option value="table">Table</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          {charts.length > 0 ? <div className="analytics-chart-grid">
+          {charts.map((chart) => (
             <article className="analytics-chart-card" key={chart.id}>
               <div className="analytics-chart-heading">
                 <div>
@@ -205,7 +235,8 @@ export default function AnalyticsDashboard({ result }) {
               <p className="analytics-chart-footnote">{chart.x_label} · {chart.y_label} · Calculated from workbook rows</p>
             </article>
           ))}
-        </div>
+          </div> : <div className="analytics-empty-filter">No charts match these filters. Try a different search or chart type.</div>}
+        </>
       ) : (
         <div className="status-message info">
           Analytics completed, but this workbook did not produce a chartable grouped result. This can happen when the available columns are descriptive text, identifiers, or scalar-only measures.

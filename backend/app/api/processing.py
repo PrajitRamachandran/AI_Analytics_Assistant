@@ -7,9 +7,10 @@ import math
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.database import get_db_connection
+from app.core.dataset_state import ensure_state_schema, save_dataset_stage, save_processing_artifact
 from app.modules.excel_ingestion import ExcelIngestionError
 from app.modules.workbook_processing import process_workbook
 
@@ -171,14 +172,15 @@ def _build_worksheet_response(processing_result, worksheet_name: str) -> dict:
 
 
 @router.post("/datasets/{dataset_id}/process")
-def process_dataset(dataset_id: str):
+def process_dataset(dataset_id: str, force: bool = Query(False, description="Re-run processing even when a cached result exists.")):
     """Run the Module 2 pipeline for an uploaded dataset and return its summary."""
     try:
+        ensure_state_schema()
         with get_db_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT filename, storage_path
+                    SELECT filename, storage_path, processing_result
                     FROM datasets
                     WHERE dataset_id = %s;
                     """,
@@ -189,7 +191,10 @@ def process_dataset(dataset_id: str):
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found.")
 
-        filename, storage_path = dataset
+        
+        filename, storage_path, cached_result = dataset
+        if cached_result and not force:
+            return {**cached_result, "cached": True, "message": "Dataset already processed; returning saved processing output."}
         file_path = _get_safe_storage_path(storage_path)
 
         if not file_path.is_file():
@@ -231,25 +236,7 @@ def process_dataset(dataset_id: str):
                 detail=f"No worksheets could be processed. {error_summary}",
             )
 
-        # Update only the existing status field; no schema changes are needed.
-        try:
-            with get_db_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        UPDATE datasets
-                        SET status = %s
-                        WHERE dataset_id = %s;
-                        """,
-                        ("processed", dataset_id),
-                    )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail="Workbook processed, but dataset status could not be updated.",
-            ) from exc
-
-        return {
+        response = {
             "status": "success",
             "message": "Workbook processed successfully."
             if failed_count == 0
@@ -274,7 +261,18 @@ def process_dataset(dataset_id: str):
             },
             "worksheets": worksheet_results,
             "worksheet_errors": errors,
+            "cached": False,
         }
+
+        try:
+            save_dataset_stage(dataset_id, 'processing_result', response, 'processed_at')
+            save_processing_artifact(dataset_id, processing_result)
+            with get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute('UPDATE datasets SET status = %s WHERE dataset_id = %s', ('processed', dataset_id))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail='Workbook processed, but its result could not be persisted.') from exc
+        return response
 
     except HTTPException:
         raise

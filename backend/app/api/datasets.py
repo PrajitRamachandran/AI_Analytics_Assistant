@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from app.core.database import get_db_connection
+from app.core.dataset_state import ensure_state_schema
 
 router = APIRouter(prefix="/api", tags=["Datasets"])
 
@@ -36,6 +37,7 @@ def get_safe_storage_path(storage_path: str) -> Path:
 async def get_datasets():
 
     try:
+        ensure_state_schema()
         with get_db_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -45,7 +47,11 @@ async def get_datasets():
                         filename,
                         file_size,
                         status,
-                        uploaded_at
+                        uploaded_at,
+                        processed_at, understood_at, analysed_at,
+                        processing_result IS NOT NULL,
+                        understanding_result IS NOT NULL,
+                        analytics_result IS NOT NULL
                     FROM datasets
                     ORDER BY uploaded_at DESC;
                     """
@@ -61,9 +67,13 @@ async def get_datasets():
                 "filename": row[1],
                 "file_size": row[2],
                 "status": row[3],
-                "uploaded_at": (
-                    row[4].isoformat() if row[4] else None
-                )
+                "uploaded_at": row[4].isoformat() if row[4] else None,
+                "processing_status": "processed" if row[8] else "not_processed",
+                "understanding_status": "understood" if row[9] else "not_understood",
+                "analytics_status": "analysed" if row[10] else "not_analysed",
+                "processed_at": row[5].isoformat() if row[5] else None,
+                "understood_at": row[6].isoformat() if row[6] else None,
+                "analysed_at": row[7].isoformat() if row[7] else None,
             })
 
         return {

@@ -1,16 +1,70 @@
-# React + Vite
+# AI Data Analytics Assistant — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite frontend for the AI Data Analytics Assistant.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm ci
+npm run dev
+```
 
-## React Compiler
+## Validation
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm test
+npm run lint
+npm run build
+```
 
-## Expanding the ESLint configuration
+The built application is served by the existing FastAPI backend/deployment setup. Keep `src/services/api.js` and its endpoint contracts aligned with the backend.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Current frontend structure
+
+- `src/components/layout/` — application shell, sidebar, and top bar.
+- `src/components/dataset/` — upload panel, dataset history, and dataset display helpers.
+- `src/components/` — analytics dashboard.
+- `src/context/` — persistent theme and appearance preferences.
+- `src/pages/` — settings page and future workflow pages.
+- `src/services/` — Axios API client.
+- `src/styles/` — shared design tokens and theme variables.
+
+## Workflow behaviour
+
+The upload and dataset-history components are presentational modules. Upload validation, API requests, progress state, dataset lifecycle actions, and processing orchestration remain owned by `App.jsx` so that existing behaviour and backend contracts are preserved while the UI is modularised.
+
+## Phase 2 & 3 — Data Explorer and Analytics
+
+- `src/components/explorer/DataExplorer.jsx` owns the worksheet preview, processing audit, and column profiling presentation.
+- `src/components/AnalyticsDashboard.jsx` owns the KPI and chart presentation, including client-side chart search and type filters.
+- `src/components/analyticsUtils.js` contains pure chart filtering and KPI formatting helpers.
+- `src/components/analyticsUtils.test.js` tests chart filtering and formatting.
+- `App.jsx` remains the workflow orchestrator and passes existing API results and callbacks into the presentation components.
+- Existing FastAPI endpoint contracts and `src/services/api.js` are unchanged.
+
+Run the frontend checks from this directory:
+
+```bash
+npm ci
+npm test
+npm run lint
+npm run build
+```
+
+## Phase 4–6
+
+See `PHASE4_5_6_IMPLEMENTATION_NOTES.md` for the settings, appearance, accessibility, API capability audit, and QA status. Reports/chat endpoints are not exposed by the supplied frontend integration, so no guessed routes or fake feature pages were added.
+
+
+## Multi-page navigation (Update 1)
+
+The workspace now has route foundations for Overview, Upload Dataset, My Datasets, Data Processing, Data Profile, Analytics and Settings. Navigation supports direct URLs and browser Back/Forward. The workflow pages are migration placeholders at this stage; existing functional panels will be moved into them in the next updates. See `UPDATE_1_NAVIGATION_FOUNDATION.md`.
+
+
+## Update 2 — Upload and dataset pages
+
+`/upload` and `/datasets` now host the existing upload and dataset-management components independently. The overview is a compact summary with recent datasets. See `UPDATE_2_UPLOAD_AND_DATASETS.md`.
+
+
+## Update 5
+The analytics planner model is selected directly from the Analytics workflow page. Workspace Settings now focuses on appearance and accessibility. The Analytics page also includes refined model controls, chart surfaces, responsive behavior and focus states.

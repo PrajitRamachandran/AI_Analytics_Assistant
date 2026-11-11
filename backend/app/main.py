@@ -5,6 +5,7 @@ from app.api.datasets import router as datasets_router
 from app.api.processing import router as processing_router
 from app.api.understanding import router as understanding_router
 from app.api.analytics import router as analytics_router
+from app.api.models import router as models_router
 
 app = FastAPI(
     title="AI Data Analytics Assistant",
@@ -42,3 +43,4 @@ app.include_router(datasets_router)
 app.include_router(processing_router)
 app.include_router(understanding_router)
 app.include_router(analytics_router)
+app.include_router(models_router)

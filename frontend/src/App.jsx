@@ -1,60 +1,21 @@
 
 import { useEffect, useState } from "react";
 import api from "./services/api";
+import UploadPanel from "./components/dataset/UploadPanel";
+import DatasetHistory from "./components/dataset/DatasetHistory";
+import AppLayout from "./components/layout/AppLayout";
+import { useAppLocation, useAppNavigate } from "./app/navigation";
+import { resolveRoute } from "./app/routeConfig";
+import DataExplorer from "./components/explorer/DataExplorer";
 import AnalyticsDashboard from "./components/AnalyticsDashboard";
+import AnalyticsModelSelector from "./components/AnalyticsModelSelector";
+import { getAllWorkflowResults, saveWorkflowResult, deleteWorkflowResult } from "./services/workflowStore";
 import "./App.css";
 
-// Allows two bounded local-LLM attempts plus workbook processing overhead.
-const ANALYTICS_REQUEST_TIMEOUT_MS = 21 * 60 * 1000;
-
-// Convert file size into a readable format
-function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(2)} KB`;
-  }
-
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-// Format uploaded timestamp
-function formatDate(date) {
-  if (!date) return "Unknown";
-
-  return new Date(date).toLocaleString();
-}
-
-
-// Render profile values safely without exposing raw JSON objects.
-function formatProfileValue(value) {
-  if (value === null || value === undefined || value === "") return "—";
-  if (typeof value === "number") {
-    return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, {
-      maximumFractionDigits: 6,
-    });
-  }
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-function formatProfileLabel(value) {
-  return String(value || "unknown")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
-function ProfileStat({ label, value }) {
-  return (
-    <div className="profile-stat">
-      <span>{label}</span>
-      <strong>{formatProfileValue(value)}</strong>
-    </div>
-  );
-}
-
 function App() {
+  const navigate = useAppNavigate();
+  const location = useAppLocation();
+  const route = resolveRoute(location.split("?")[0].split("#")[0]);
   const [file, setFile] = useState(null);
 
   const [uploading, setUploading] = useState(false);
@@ -72,16 +33,71 @@ function App() {
 
   const [deletingId, setDeletingId] = useState(null);
   const [downloadingId, setDownloadingId] = useState(null);
+  const [workflowByDataset, setWorkflowByDataset] = useState({});
   const [processingId, setProcessingId] = useState(null);
-  const [processingResult, setProcessingResult] = useState(null);
-  const [processedDatasetId, setProcessedDatasetId] = useState(null);
-
-  const [understandingResult, setUnderstandingResult] = useState(null);
-  const [understandingId, setUnderstandingId] = useState(null);
-  const [understandingError, setUnderstandingError] = useState("");
-  const [analyticsResult, setAnalyticsResult] = useState(null);
+  const [profilingId, setProfilingId] = useState(null);
   const [analyticsId, setAnalyticsId] = useState(null);
-  const [analyticsError, setAnalyticsError] = useState("");
+  const [workflowError, setWorkflowError] = useState("");
+
+  const activeDataset = datasets.find((item) => String(item.dataset_id) === String(route.datasetId)) || null;
+  const activeWorkflow = activeDataset ? workflowByDataset[activeDataset.dataset_id] || {} : {};
+
+  const updateWorkflow = (datasetId, patch) => {
+    setWorkflowByDataset((current) => ({
+      ...current,
+      [datasetId]: { ...(current[datasetId] || {}), ...patch },
+    }));
+  };
+
+  const handleProcess = async (dataset, force = false) => {
+    if (!dataset?.dataset_id) return;
+    setProcessingId(dataset.dataset_id);
+    setWorkflowError("");
+    try {
+      const response = await api.post(`/api/datasets/${dataset.dataset_id}/process${force ? "?force=true" : ""}`);
+      updateWorkflow(dataset.dataset_id, { processingResult: response.data, processingSavedAt: new Date().toISOString() });
+      saveWorkflowResult(dataset.dataset_id, "processing", response.data).catch((storageError) => console.warn("Could not persist processing results:", storageError));
+      await fetchDatasets();
+    } catch (err) {
+      setWorkflowError(err.response?.data?.detail || err.message || "Unable to process this dataset.");
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  const handleUnderstand = async (dataset, force = false) => {
+    if (!dataset?.dataset_id) return;
+    setProfilingId(dataset.dataset_id);
+    setWorkflowError("");
+    try {
+      const response = await api.post(`/api/datasets/${dataset.dataset_id}/understand${force ? "?force=true" : ""}`);
+      updateWorkflow(dataset.dataset_id, { understandingResult: response.data, understandingSavedAt: new Date().toISOString() });
+      saveWorkflowResult(dataset.dataset_id, "profile", response.data).catch((storageError) => console.warn("Could not persist profile results:", storageError));
+      await fetchDatasets();
+    } catch (err) {
+      setWorkflowError(err.response?.data?.detail || err.message || "Unable to profile this dataset.");
+    } finally {
+      setProfilingId(null);
+    }
+  };
+
+  const handleGenerateAnalytics = async (dataset, force = false) => {
+    if (!dataset?.dataset_id) return;
+    setAnalyticsId(dataset.dataset_id);
+    setWorkflowError("");
+    try {
+      const response = await api.post(`/api/datasets/${dataset.dataset_id}/analytics${force ? "?force=true" : ""}`, undefined, { timeout: 21 * 60 * 1000 });
+      updateWorkflow(dataset.dataset_id, { analyticsResult: response.data, analyticsSavedAt: new Date().toISOString() });
+      saveWorkflowResult(dataset.dataset_id, "analytics", response.data).catch((storageError) => console.warn("Could not persist analytics results:", storageError));
+      await fetchDatasets();
+    } catch (err) {
+      setWorkflowError(err.response?.data?.detail || err.message || "Unable to generate analytics.");
+    } finally {
+      setAnalyticsId(null);
+    }
+  };
+
+
 
   // Retrieve uploaded datasets from FastAPI
   const fetchDatasets = async () => {
@@ -101,6 +117,25 @@ function App() {
       setLoadingHistory(false);
     }
   };
+
+  // Restore detailed workflow payloads from browser-persistent IndexedDB storage.
+  useEffect(() => {
+    let ignore = false;
+    getAllWorkflowResults().then((records) => {
+      if (ignore) return;
+      const restored = {};
+      for (const record of records) {
+        const stages = record.stages || {};
+        restored[record.datasetId] = {
+          ...(stages.processing ? { processingResult: stages.processing.result, processingSavedAt: stages.processing.savedAt } : {}),
+          ...(stages.profile ? { understandingResult: stages.profile.result, understandingSavedAt: stages.profile.savedAt } : {}),
+          ...(stages.analytics ? { analyticsResult: stages.analytics.result, analyticsSavedAt: stages.analytics.savedAt } : {}),
+        };
+      }
+      setWorkflowByDataset(restored);
+    }).catch((storageError) => console.warn("Could not restore saved workflow history:", storageError));
+    return () => { ignore = true; };
+  }, []);
 
   // Initial history loading when the application opens
   useEffect(() => {
@@ -204,10 +239,11 @@ function App() {
       await fetchDatasets();
 
     } catch (err) {
+      const detail = err.response?.data?.detail;
       setError(
-        err.response?.data?.detail ||
-        err.message ||
-        "Upload failed. Please try again."
+        err.response?.status === 409
+          ? (detail || "File already exists. This workbook has already been uploaded.")
+          : (detail || err.message || "Upload failed. Please try again.")
       );
     } finally {
       setUploading(false);
@@ -260,108 +296,8 @@ function App() {
   };
 
 
-  // Process an uploaded workbook through Module 2
-  const handleProcess = async (dataset) => {
-    setProcessingId(dataset.dataset_id);
-    setProcessingResult(null);
-    setProcessedDatasetId(null);
-    setUnderstandingResult(null);
-    setUnderstandingError("");
-    setAnalyticsResult(null);
-    setAnalyticsError("");
-    setActionError("");
-    setActionSuccess("");
-
-    try {
-      const response = await api.post(
-        `/api/datasets/${dataset.dataset_id}/process`,
-        {},
-        { timeout: 120000 }
-      );
-
-      setProcessingResult(response.data);
-      setProcessedDatasetId(dataset.dataset_id);
-      setActionSuccess(`${dataset.filename} processed successfully.`);
-      await fetchDatasets();
-
-    } catch (err) {
-      setActionError(
-        err.response?.data?.detail ||
-        "Unable to process this workbook. Please try again."
-      );
-    } finally {
-      setProcessingId(null);
-    }
-  };
-
-  // Generate Module 3 data understanding for a successfully processed dataset.
-  const handleUnderstand = async () => {
-    if (!processedDatasetId) return;
-
-    setUnderstandingId(processedDatasetId);
-    setUnderstandingError("");
-    setUnderstandingResult(null);
-    setAnalyticsResult(null);
-    setAnalyticsError("");
-    setActionError("");
-    setActionSuccess("");
-
-    try {
-      const response = await api.post(
-        `/api/datasets/${processedDatasetId}/understand`,
-        {},
-        { timeout: 120000 }
-      );
-
-      setUnderstandingResult(response.data);
-      setActionSuccess(`${response.data.filename} profiled successfully.`);
-    } catch (err) {
-      setUnderstandingError(
-        err.response?.data?.detail ||
-        "Unable to understand this dataset. Please try again."
-      );
-    } finally {
-      setUnderstandingId(null);
-    }
-  };
-
-  // Generate a validated Module 4 plan, execute it deterministically, and return chart data.
-  const handleGenerateAnalytics = async () => {
-    if (!processedDatasetId) return;
-
-    setAnalyticsId(processedDatasetId);
-    setAnalyticsError("");
-    setAnalyticsResult(null);
-    setActionError("");
-    setActionSuccess("");
-
-    try {
-      const response = await api.post(
-        `/api/datasets/${processedDatasetId}/analytics`,
-        {},
-        { timeout: ANALYTICS_REQUEST_TIMEOUT_MS }
-      );
-      setAnalyticsResult(response.data);
-      setActionSuccess("Analytics generated and executed successfully.");
-    } catch (err) {
-      setAnalyticsError(
-        err.response?.data?.detail ||
-        err.message ||
-        "Unable to generate analytics. Please check the backend and Ollama."
-      );
-    } finally {
-      setAnalyticsId(null);
-    }
-  };
-
   // Delete an uploaded Excel workbook
   const handleDelete = async (dataset) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete "${dataset.filename}"?\n\nThis will permanently delete the stored file and its database record.`
-    );
-
-    if (!confirmed) return;
-
     setDeletingId(dataset.dataset_id);
     setActionError("");
     setActionSuccess("");
@@ -370,15 +306,8 @@ function App() {
       await api.delete(
         `/api/datasets/${dataset.dataset_id}`
       );
-
-      if (processedDatasetId === dataset.dataset_id) {
-        setProcessingResult(null);
-        setProcessedDatasetId(null);
-        setUnderstandingResult(null);
-        setUnderstandingError("");
-        setAnalyticsResult(null);
-        setAnalyticsError("");
-      }
+      await deleteWorkflowResult(dataset.dataset_id).catch((storageError) => console.warn("Could not clear deleted dataset history:", storageError));
+      setWorkflowByDataset((current) => { const next = { ...current }; delete next[dataset.dataset_id]; return next; });
 
       setActionSuccess(
         `${dataset.filename} deleted successfully.`
@@ -396,722 +325,152 @@ function App() {
     }
   };
 
-  return (
-    <main className="app-container">
-
-      {/* Application Header */}
+  const uploadPage = (
+    <div className="app-container dedicated-page">
       <header className="app-header">
         <div>
-          <p className="eyebrow">
-            AI DATA ANALYTICS ASSISTANT
-          </p>
-
-          <h1>Data Workspace</h1>
-
-          <p className="subtitle">
-            Upload your Excel workbooks and manage your datasets.
-          </p>
+          <p className="eyebrow">WORKSPACE / DATA INGESTION</p>
+          <h1>Upload Dataset</h1>
+          <p className="subtitle">Upload an Excel workbook to begin preparing and analysing your data.</p>
         </div>
       </header>
+      <UploadPanel file={file} uploading={uploading} progress={progress} error={error}
+        result={result} onFileChange={handleFileChange} onUpload={handleUpload}
+        onViewDatasets={() => navigate("/datasets")} />
+    </div>
+  );
 
-
-      {/* Excel Upload Section */}
-      <section className="upload-card">
-
-        <div className="upload-icon">📊</div>
-
-        <h2>Upload Excel Workbook</h2>
-
-        <p className="upload-description">
-          Select an Excel file to get started with your analysis.
-        </p>
-
-        <label className="file-picker">
-          Choose Excel File
-
-          <input
-            type="file"
-            accept=".xlsx"
-            onChange={(event) =>
-              handleFileChange(event.target.files?.[0])
-            }
-            disabled={uploading}
-          />
-        </label>
-
-        <p className="file-hint">
-          Supported format: .xlsx · Maximum size: 25 MB
-        </p>
-
-
-        {/* Selected File */}
-        {file && (
-          <div className="selected-file">
-            <span>📄</span>
-
-            <div className="file-details">
-              <strong>{file.name}</strong>
-
-              <small>
-                {formatFileSize(file.size)}
-              </small>
-            </div>
-          </div>
-        )}
-
-
-        {/* Upload Progress */}
-        {uploading && (
-          <div className="progress-section">
-
-            <div className="progress-label">
-              <span>Uploading...</span>
-              <span>{progress}%</span>
-            </div>
-
-            <div className="progress-track">
-              <div
-                className="progress-fill"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-
-          </div>
-        )}
-
-
-        {/* Upload Button */}
-        <button
-          className="upload-button"
-          onClick={handleUpload}
-          disabled={!file || uploading}
-        >
-          {uploading ? "Uploading..." : "Upload File"}
-        </button>
-
-
-        {/* Upload Error */}
-        {error && (
-          <div className="status-message error">
-            <strong>Upload Failed</strong>
-            <p>{error}</p>
-          </div>
-        )}
-
-
-        {/* Upload Success */}
-        {result && (
-          <div className="status-message success">
-            <strong>Upload Successful!</strong>
-
-            <p>{result.filename}</p>
-
-            <small>
-              Dataset ID: {result.dataset_id}
-            </small>
-          </div>
-        )}
-
-      </section>
-
-
-      {/* Uploaded Files History */}
-      <section className="history-section">
-
-        <div className="history-header">
-
-          <div>
-            <h2>Uploaded Files</h2>
-
-            <p className="subtitle">
-              Your previously uploaded datasets.
-            </p>
-          </div>
-
-          <button
-            className="refresh-button"
-            onClick={fetchDatasets}
-            disabled={loadingHistory}
-          >
-            {loadingHistory ? "Refreshing..." : "↻ Refresh"}
-          </button>
-
+  const datasetsPage = (
+    <div className="app-container dedicated-page">
+      <header className="app-header">
+        <div>
+          <p className="eyebrow">WORKSPACE / LIBRARY</p>
+          <h1>My Datasets</h1>
+          <p className="subtitle">Manage your uploaded workbooks and open a dataset workspace.</p>
         </div>
+        <button className="upload-button page-primary-action" onClick={() => navigate("/upload")}>+ Upload Dataset</button>
+      </header>
+      <DatasetHistory datasets={datasets} loading={loadingHistory} error={historyError}
+        onRefresh={fetchDatasets}
+        onOpenDataset={(dataset) => navigate(`/datasets/${encodeURIComponent(dataset.dataset_id)}/processing`)}
+        onDownload={handleDownload} onDelete={handleDelete}
+        downloadingId={downloadingId} deletingId={deletingId} />
+      {(actionError || actionSuccess) && (
+        <div className={`status-message ${actionError ? "error" : "success"}`} role={actionError ? "alert" : "status"}>
+          <strong>{actionError ? "Action failed" : "Action completed"}</strong>
+          <p>{actionError || actionSuccess}</p>
+        </div>
+      )}
+    </div>
+  );
 
-
-        <div className="history-card">
-
-          {/* Loading */}
-          {loadingHistory ? (
-            <p className="empty-message">
-              Loading your datasets...
-            </p>
-
-          ) : historyError ? (
-
-            /* History Error */
-            <div className="status-message error">
-              <strong>Unable to load history</strong>
-              <p>{historyError}</p>
+  const stage = route.id;
+  const stageDataset = activeDataset;
+  const stagePage = (
+    <div className="app-container dedicated-page workflow-page">
+      <header className="app-header workflow-page-header">
+        <div>
+          <p className="eyebrow">DATA WORKFLOW / {stage === "processing" ? "MODULE 2" : stage === "profile" ? "MODULE 3" : "MODULE 4"}</p>
+          <h1>{stage === "processing" ? "Data Processing" : stage === "profile" ? "Data Profile" : "Analytics"}</h1>
+          <p className="subtitle">{stage === "processing" ? "Review workbook normalisation, worksheet quality and processed previews." : stage === "profile" ? "Inspect column types, distributions, missing values and statistical summaries." : "Explore verified KPIs, charts and analytical findings generated for this dataset."}</p>
+        </div>
+        <div className="workflow-page-actions">
+          {stageDataset && <span className="workflow-dataset-name" title={stageDataset.filename}>{stageDataset.filename}</span>}
+          <button className="secondary-button compact-action" onClick={() => navigate("/datasets")}>All datasets</button>
+        </div>
+      </header>
+      {!stageDataset ? (
+        <section className="workflow-empty-state"><h2>Select a dataset to continue</h2><p>Choose a workbook from My Datasets to open its processing, profile and analytics workspace.</p><button className="primary-button compact-action" onClick={() => navigate("/datasets")}>Choose dataset</button></section>
+      ) : (
+        <>
+          <nav className="workflow-stage-nav" aria-label="Dataset workflow">
+            {[["processing", "Processing"], ["profile", "Data Profile"], ["analytics", "Analytics"]].map(([id, labelText]) => (
+              <button key={id} className={stage === id ? "active" : ""} aria-current={stage === id ? "page" : undefined} onClick={() => navigate(`/datasets/${encodeURIComponent(stageDataset.dataset_id)}/${id}`)}>{labelText}</button>
+            ))}
+          </nav>
+          <section className="workflow-history" aria-label="Saved workflow history">
+            <div className="workflow-history-heading"><div><h2>Workflow history</h2><p>Saved results are restored automatically when you reopen this workspace.</p></div><span className="workflow-history-count">{[activeWorkflow.processingResult, activeWorkflow.understandingResult, activeWorkflow.analyticsResult].filter(Boolean).length} of 3 completed</span></div>
+            <div className="workflow-history-grid">
+              {[{ id: "processing", label: "Processing", value: activeWorkflow.processingResult, savedAt: activeWorkflow.processingSavedAt }, { id: "profile", label: "Understanding & profile", value: activeWorkflow.understandingResult, savedAt: activeWorkflow.understandingSavedAt }, { id: "analytics", label: "Analytics", value: activeWorkflow.analyticsResult, savedAt: activeWorkflow.analyticsSavedAt }].map((item) => (
+                <button type="button" key={item.id} className={`workflow-history-item ${item.value ? "is-complete" : ""}`} onClick={() => navigate(`/datasets/${encodeURIComponent(stageDataset.dataset_id)}/${item.id}`)}>
+                  <span className="workflow-history-status">{item.value ? "Completed" : "Not run"}</span><strong>{item.label}</strong><small>{item.savedAt ? `Saved ${new Date(item.savedAt).toLocaleString()}` : "No saved result"}</small>
+                </button>
+              ))}
             </div>
-
-          ) : datasets.length === 0 ? (
-
-            /* Empty State */
-            <div className="empty-state">
-              <span>📂</span>
-
-              <h3>No uploaded files yet</h3>
-
-              <p>
-                Your uploaded Excel files will appear here.
-              </p>
-            </div>
-
-          ) : (
-
-            /* Dataset Table */
+          </section>
+          {workflowError && <div className="status-message error" role="alert"><strong>Workflow action failed</strong><p>{workflowError}</p></div>}
+          {stage === "processing" && (
             <>
-              <div className="dataset-summary">
-                <strong>
-                  {datasets.length} dataset(s)
-                </strong>
-              </div>
-
-              <div className="table-wrapper">
-
-                <table className="dataset-table">
-
-                  <thead>
-                    <tr>
-                      <th>Filename</th>
-                      <th>Size</th>
-                      <th>Uploaded At</th>
-                      <th>Status</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {datasets.map((dataset) => (
-
-                      <tr key={dataset.dataset_id}>
-
-                        <td className="filename-cell">
-                          📄 {dataset.filename}
-                        </td>
-
-                        <td>
-                          {formatFileSize(dataset.file_size)}
-                        </td>
-
-                        <td>
-                          {formatDate(dataset.uploaded_at)}
-                        </td>
-
-                        <td>
-                          <span className="status-badge">
-                            {dataset.status}
-                          </span>
-                        </td>
-
-                        <td>
-                          <div className="action-buttons">
-
-                            <button
-                              className="process-button"
-                              onClick={() => handleProcess(dataset)}
-                              disabled={processingId === dataset.dataset_id}
-                            >
-                              {processingId === dataset.dataset_id
-                                ? "Processing..."
-                                : "⚙ Process"}
-                            </button>
-
-                            <button
-                              className="download-button"
-                              onClick={() =>
-                                handleDownload(dataset)
-                              }
-                              disabled={
-                                downloadingId === dataset.dataset_id
-                              }
-                            >
-                              {downloadingId === dataset.dataset_id
-                                ? "Downloading..."
-                                : "↓ Download"}
-                            </button>
-
-                            <button
-                              className="delete-button"
-                              onClick={() =>
-                                handleDelete(dataset)
-                              }
-                              disabled={
-                                deletingId === dataset.dataset_id
-                              }
-                            >
-                              {deletingId === dataset.dataset_id
-                                ? "Deleting..."
-                                : "Delete"}
-                            </button>
-
-                          </div>
-                        </td>
-
-                      </tr>
-
-                    ))}
-                  </tbody>
-
-                </table>
-
-              </div>
+              <div className="workflow-action-strip"><div><strong>Workbook processing</strong><span>Run the existing processing service for this dataset.</span></div><button className="primary-button compact-action" onClick={() => handleProcess(stageDataset, Boolean(activeWorkflow.processingResult))} disabled={processingId === stageDataset.dataset_id}>{processingId === stageDataset.dataset_id ? "Processing…" : activeWorkflow.processingResult ? "Reprocess dataset" : "Process dataset"}</button></div>
+              {activeWorkflow.processingResult ? <DataExplorer stage="processing" processingResult={activeWorkflow.processingResult} /> : <div className="workflow-empty-state"><h2>{processingId === stageDataset.dataset_id ? "Processing workbook…" : "This dataset has not been processed in this session"}</h2><p>Start processing to inspect worksheet previews, normalisation and data-quality results.</p></div>}
             </>
           )}
+          {stage === "profile" && (
+            <>
+              <div className="workflow-action-strip"><div><strong>Dataset profiling</strong><span>{activeWorkflow.processingResult || stageDataset.processing_status === "processed" ? "This workbook has completed processing." : "Profiling requires a successfully processed dataset."}</span></div><button className="primary-button compact-action" onClick={() => handleUnderstand(stageDataset, Boolean(activeWorkflow.understandingResult))} disabled={!(activeWorkflow.processingResult || stageDataset.processing_status === "processed") || profilingId === stageDataset.dataset_id}>{profilingId === stageDataset.dataset_id ? "Profiling…" : activeWorkflow.understandingResult ? "Re-run profile" : "Generate profile"}</button></div>
+              {activeWorkflow.understandingResult ? <DataExplorer stage="profile" understandingResult={activeWorkflow.understandingResult} /> : <div className="workflow-empty-state"><h2>{profilingId === stageDataset.dataset_id ? "Profiling workbook…" : "No profile available yet"}</h2><p>Process this dataset first, then generate its column-level profile.</p>{!activeWorkflow.processingResult && <button className="secondary-button compact-action" onClick={() => navigate(`/datasets/${encodeURIComponent(stageDataset.dataset_id)}/processing`)}>Go to processing</button>}</div>}
+            </>
+          )}
+          {stage === "analytics" && (
+            <>
+              <AnalyticsModelSelector />
+              <div className="workflow-action-strip"><div><strong>Analytics generation</strong><span>Generate dataset-specific KPIs, charts and insights.</span></div><button className="primary-button compact-action" onClick={() => handleGenerateAnalytics(stageDataset, Boolean(activeWorkflow.analyticsResult))} disabled={!(activeWorkflow.processingResult || stageDataset.processing_status === "processed") || analyticsId === stageDataset.dataset_id}>{analyticsId === stageDataset.dataset_id ? "Generating…" : activeWorkflow.analyticsResult ? "Regenerate analytics" : "Generate analytics"}</button></div>
+              {activeWorkflow.analyticsResult ? <AnalyticsDashboard result={activeWorkflow.analyticsResult} /> : <div className="workflow-empty-state"><h2>{analyticsId === stageDataset.dataset_id ? "Generating analytics…" : "No analytics generated yet"}</h2><p>Process this dataset first, then generate its analytics using the configured planner.</p>{!activeWorkflow.processingResult && <button className="secondary-button compact-action" onClick={() => navigate(`/datasets/${encodeURIComponent(stageDataset.dataset_id)}/processing`)}>Go to processing</button>}</div>}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
 
+  const overviewPage = (
+    <div className="app-container dedicated-page">
+      <header className="app-header" id="app-header">
+        <div>
+          <p className="eyebrow">AI DATA ANALYTICS ASSISTANT</p>
+          <h1>Overview</h1>
+          <p className="subtitle">A clear view of your data workspace and recent activity.</p>
         </div>
-
-        {/* Module 2 Processing Results */}
-        {processingResult && (
-          <section className="processing-results">
-            <div className="processing-results-header">
-              <div>
-                <h2>Processing Results</h2>
-                <p className="subtitle">{processingResult.filename}</p>
-              </div>
-
-              <div className="processing-header-actions">
-                <button
-                  className="understand-button"
-                  onClick={handleGenerateAnalytics}
-                  disabled={Boolean(analyticsId) || !processedDatasetId}
-                >
-                  {analyticsId ? "Generating analytics..." : "✦ Generate Analytics Dashboard"}
-                </button>
-                <button
-                  className="understand-button"
-                  onClick={handleUnderstand}
-                  disabled={!processedDatasetId || understandingId === processedDatasetId}
-                >
-                  {understandingId === processedDatasetId
-                    ? "Understanding..."
-                    : understandingResult
-                      ? "↻ Re-run Understanding"
-                      : "✦ Understand Dataset"}
-                </button>
-
-                <button
-                  className="refresh-button"
-                  onClick={() => setProcessingResult(null)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-
-            <div className="processing-summary">
-              <div>
-                <strong>{processingResult.processing.total_worksheet_count}</strong>
-                <span>Total worksheets</span>
-              </div>
-              <div>
-                <strong>{processingResult.processing.successful_worksheet_count}</strong>
-                <span>Processed</span>
-              </div>
-              <div>
-                <strong>{processingResult.processing.failed_worksheet_count}</strong>
-                <span>Failed</span>
-              </div>
-              <div>
-                <strong>{processingResult.processing.normalized_cell_count ?? 0}</strong>
-                <span>Values normalised</span>
-              </div>
-              <div>
-                <strong>{processingResult.processing.unparseable_cell_count ?? 0}</strong>
-                <span>Unparsed values preserved</span>
-              </div>
-            </div>
-
-            {Object.values(processingResult.worksheets).map((sheet) => (
-              <article className="sheet-result-card" key={sheet.worksheet_name}>
-                <div className="sheet-result-heading">
-                  <h3>{sheet.worksheet_name}</h3>
-                  <span>
-                    {sheet.row_count} rows · {sheet.column_count} columns
-                  </span>
-                </div>
-
-                <div className="column-chip-list">
-                  {sheet.columns.map((column) => (
-                    <span className="column-chip" key={column.name} title={`Original: ${column.original_name}`}>
-                      {column.name}
-                      <small>{column.data_category}</small>
-                    </span>
-                  ))}
-                </div>
-
-                <div className="quality-summary">
-                  <span>Empty rows removed: {sheet.quality.removed_empty_row_count}</span>
-                  <span>Empty columns removed: {sheet.quality.removed_empty_column_count}</span>
-                  <span>Duplicate rows found: {sheet.quality.duplicate_row_count} (retained by default)</span>
-                  <span>Missing cells: {sheet.quality.total_missing_value_count}</span>
-                  <span>Blank strings: {sheet.quality.total_blank_string_count}</span>
-                  <span>Whitespace-padded values: {sheet.quality.total_whitespace_padded_string_count}</span>
-                </div>
-
-                <details className="processing-audit">
-                  <summary>View normalisation audit</summary>
-                  <div className="table-wrapper">
-                    <table className="dataset-table audit-table">
-                      <thead>
-                        <tr>
-                          <th>Column</th>
-                          <th>Original header</th>
-                          <th>Detected meaning</th>
-                          <th>Cells changed</th>
-                          <th>Unparsed values</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sheet.columns.map((column) => (
-                          <tr key={column.name}>
-                            <td>{column.name}</td>
-                            <td>{column.original_name}</td>
-                            <td>{formatProfileLabel(column.normalization?.semantic_type || column.data_category)}</td>
-                            <td>{column.normalization?.cells_changed ?? 0}</td>
-                            <td>{column.normalization?.unparseable_count ?? 0}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {sheet.columns.some((column) => column.normalization?.notes?.length || column.normalization?.unparseable_samples?.length) && (
-                    <div className="normalization-notes">
-                      {sheet.columns.filter((column) => column.normalization?.notes?.length || column.normalization?.unparseable_samples?.length).map((column) => (
-                        <div key={column.name}>
-                          <strong>{column.name}</strong>
-                          {column.normalization?.notes?.map((note, index) => <p key={index}>{note}</p>)}
-                          {column.normalization?.unparseable_samples?.length > 0 && (
-                            <p>Preserved unparsed examples: {column.normalization.unparseable_samples.join(", ")}</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </details>
-
-                {sheet.preview.length > 0 ? (
-                  <div className="table-wrapper preview-wrapper">
-                    <table className="dataset-table preview-table">
-                      <thead>
-                        <tr>
-                          {Object.keys(sheet.preview[0]).map((column) => (
-                            <th key={column}>{column}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {sheet.preview.map((row, rowIndex) => (
-                          <tr key={rowIndex}>
-                            {Object.keys(sheet.preview[0]).map((column) => (
-                              <td key={column}>
-                                {row[column] === null ? "—" : String(row[column])}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="empty-message">No data rows available for preview.</p>
-                )}
-              </article>
-            ))}
-
-            {Object.keys(processingResult.worksheet_errors || {}).length > 0 && (
-              <div className="status-message error">
-                <strong>Some worksheets could not be processed</strong>
-                {Object.entries(processingResult.worksheet_errors).map(([name, message]) => (
-                  <p key={name}><strong>{name}:</strong> {message}</p>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* Module 3 Data Understanding Results */}
-        {(understandingId || understandingError || understandingResult) && (
-          <section className="understanding-results">
-            <div className="understanding-results-header">
-              <div>
-                <p className="eyebrow">MODULE 3</p>
-                <h2>Dataset Understanding</h2>
-                <p className="subtitle">
-                  {understandingResult?.filename || processingResult?.filename}
-                </p>
-              </div>
-
-              {understandingResult && (
-                <button
-                  className="refresh-button"
-                  onClick={() => setUnderstandingResult(null)}
-                >
-                  Close
-                </button>
-              )}
-            </div>
-
-            {understandingId && (
-              <div className="understanding-loading">
-                <span className="loading-spinner" />
-                <div>
-                  <strong>Understanding your dataset...</strong>
-                  <p>Profiling worksheets and calculating column statistics.</p>
-                </div>
-              </div>
-            )}
-
-            {understandingError && (
-              <div className="status-message error">
-                <strong>Dataset understanding failed</strong>
-                <p>{understandingError}</p>
-                <button
-                  className="understand-button retry-understand-button"
-                  onClick={handleUnderstand}
-                  disabled={Boolean(understandingId)}
-                >
-                  Try Again
-                </button>
-              </div>
-            )}
-
-            {understandingResult && (
-              <>
-                <div className="understanding-summary">
-                  <ProfileStat
-                    label="Worksheets"
-                    value={understandingResult.total_worksheet_count}
-                  />
-                  <ProfileStat
-                    label="Successfully profiled"
-                    value={understandingResult.successful_worksheet_count}
-                  />
-                  <ProfileStat
-                    label="Failed"
-                    value={understandingResult.failed_worksheet_count}
-                  />
-                </div>
-
-                {Object.keys(understandingResult.worksheets || {}).length > 0 ? (
-                  <div className="understanding-sheet-list">
-                    {Object.entries(understandingResult.worksheets).map(
-                      ([sheetKey, sheet]) => (
-                        <details className="understanding-sheet" key={sheetKey}>
-                          <summary className="understanding-sheet-summary">
-                            <div className="summary-main">
-                              <strong>{sheet.worksheet_name || sheetKey}</strong>
-                              <span>
-                                {formatProfileValue(sheet.row_count)} rows
-                                {" · "}
-                                {formatProfileValue(sheet.column_count)} columns
-                              </span>
-                            </div>
-                            <span className="expand-hint">View profile</span>
-                          </summary>
-
-                          <div className="worksheet-profile-content">
-                            <div className="worksheet-profile-stats">
-                              <ProfileStat label="Numerical" value={sheet.numerical_column_count} />
-                              <ProfileStat label="Categorical" value={sheet.categorical_column_count} />
-                              <ProfileStat label="Date" value={sheet.date_column_count} />
-                              <ProfileStat label="Text" value={sheet.text_column_count} />
-                              <ProfileStat label="Boolean" value={sheet.boolean_column_count} />
-                              <ProfileStat label="Other" value={sheet.other_column_count} />
-                              <ProfileStat label="Missing values" value={sheet.total_missing_value_count} />
-                              <ProfileStat label="Blank strings" value={sheet.total_blank_string_count} />
-                              <ProfileStat label="Duplicate rows" value={sheet.duplicate_row_count} />
-                            </div>
-
-                            <div className="column-profile-heading">
-                              <h4>Column profiles</h4>
-                              <span>{sheet.columns?.length || 0} columns</span>
-                            </div>
-
-                            {sheet.columns?.length ? (
-                              <div className="column-profile-list">
-                                {sheet.columns.map((column) => (
-                                  <details className="column-profile" key={column.column_name}>
-                                    <summary>
-                                      <div className="column-summary-main">
-                                        <strong>{column.column_name}</strong>
-                                        {column.original_name !== column.column_name && (
-                                          <span>Original: {column.original_name}</span>
-                                        )}
-                                      </div>
-                                      <div className="column-summary-tags">
-                                        <span className={`type-tag type-${column.inferred_type}`}>
-                                          {formatProfileLabel(column.inferred_type)}
-                                        </span>
-                                        <span className="role-tag">
-                                          {formatProfileLabel(column.semantic_role)}
-                                        </span>
-                                      </div>
-                                    </summary>
-
-                                    <div className="column-profile-content">
-                                      <div className="column-metadata-grid">
-                                        <ProfileStat label="Pandas dtype" value={column.pandas_dtype} />
-                                        <ProfileStat label="Non-empty values" value={column.non_null_count} />
-                                        <ProfileStat label="Missing values" value={column.missing_value_count} />
-                                        <ProfileStat label="Blank strings" value={column.blank_string_count} />
-                                        <ProfileStat label="Missing %" value={`${formatProfileValue(column.missing_percentage)}%`} />
-                                        <ProfileStat label="Unique values" value={column.unique_value_count} />
-                                        <ProfileStat label="Unique %" value={`${formatProfileValue(column.unique_value_percentage)}%`} />
-                                      </div>
-
-                                      {column.sample_values?.length > 0 && (
-                                        <div className="profile-detail-block">
-                                          <h5>Sample values</h5>
-                                          <div className="sample-value-list">
-                                            {column.sample_values.map((value, index) => (
-                                              <span className="sample-value" key={`${column.column_name}-sample-${index}`}>
-                                                {formatProfileValue(value)}
-                                              </span>
-                                            ))}
-                                          </div>
-                                        </div>
-                                      )}
-
-                                      {column.numerical_statistics && (
-                                        <div className="profile-detail-block">
-                                          <h5>Numerical statistics</h5>
-                                          <div className="column-metadata-grid">
-                                            <ProfileStat label="Minimum" value={column.numerical_statistics.minimum} />
-                                            <ProfileStat label="Maximum" value={column.numerical_statistics.maximum} />
-                                            <ProfileStat label="Mean" value={column.numerical_statistics.mean} />
-                                            <ProfileStat label="Median" value={column.numerical_statistics.median} />
-                                            <ProfileStat label="Total" value={column.numerical_statistics.total} />
-                                            <ProfileStat label="Std. deviation" value={column.numerical_statistics.standard_deviation} />
-                                          </div>
-                                        </div>
-                                      )}
-
-                                      {column.categorical_statistics && (
-                                        <div className="profile-detail-block">
-                                          <h5>
-                                            Category distribution
-                                            <span>{column.categorical_statistics.unique_category_count} unique categories</span>
-                                          </h5>
-                                          {column.categorical_statistics.most_frequent?.length ? (
-                                            <div className="frequency-list">
-                                              {column.categorical_statistics.most_frequent.map((item, index) => (
-                                                <div className="frequency-row" key={`${column.column_name}-frequency-${index}`}>
-                                                  <span>{formatProfileValue(item.value)}</span>
-                                                  <strong>{formatProfileValue(item.count)}</strong>
-                                                </div>
-                                              ))}
-                                            </div>
-                                          ) : (
-                                            <p className="profile-muted">No category frequencies available.</p>
-                                          )}
-                                        </div>
-                                      )}
-
-                                      {column.date_statistics && (
-                                        <div className="profile-detail-block">
-                                          <h5>Date range</h5>
-                                          <div className="column-metadata-grid">
-                                            <ProfileStat label="Earliest" value={column.date_statistics.earliest} />
-                                            <ProfileStat label="Latest" value={column.date_statistics.latest} />
-                                          </div>
-                                        </div>
-                                      )}
-
-                                      {column.mixed_value_types?.length > 0 && (
-                                        <div className="profile-detail-block">
-                                          <h5>Mixed underlying value types</h5>
-                                          <div className="sample-value-list">
-                                            {column.mixed_value_types.map((type) => (
-                                              <span className="sample-value" key={type}>{type}</span>
-                                            ))}
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </details>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="empty-message">No column profiles are available for this worksheet.</p>
-                            )}
-                          </div>
-                        </details>
-                      )
-                    )}
-                  </div>
-                ) : (
-                  <p className="empty-message">No worksheet profiles are available.</p>
-                )}
-
-                {Object.keys(understandingResult.worksheet_errors || {}).length > 0 && (
-                  <div className="status-message error">
-                    <strong>Some worksheets could not be profiled</strong>
-                    {Object.entries(understandingResult.worksheet_errors).map(([name, message]) => (
-                      <p key={name}><strong>{name}:</strong> {message}</p>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-          </section>
-        )}
-
-        {analyticsId && (
-          <div className="understanding-loading">
-            <span className="loading-spinner" />
-            <div>
-              <strong>Generating your analytics dashboard...</strong>
-              <p>Ollama is preparing the plan. Pandas will calculate the actual results. This can take a few minutes on a local model.</p>
-            </div>
-          </div>
-        )}
-
-        {analyticsError && (
-          <div className="status-message error">
-            <strong>Analytics generation failed</strong>
-            <p>{analyticsError}</p>
-            <button
-              className="understand-button retry-understand-button"
-              onClick={handleGenerateAnalytics}
-              disabled={Boolean(analyticsId)}
-            >
-              Try Again
-            </button>
-          </div>
-        )}
-
-        <AnalyticsDashboard result={analyticsResult} />
-
-        {/* Download / Delete Feedback */}
-        {actionError && (
-          <div className="status-message error">
-            <strong>Action Failed</strong>
-            <p>{actionError}</p>
-          </div>
-        )}
-
-        {actionSuccess && (
-          <div className="status-message success">
-            <strong>Success</strong>
-            <p>{actionSuccess}</p>
-          </div>
-        )}
-
+        <button className="upload-button page-primary-action" onClick={() => navigate("/upload")}>+ Upload Dataset</button>
+      </header>
+      <section className="overview-summary-grid" aria-label="Workspace summary">
+        <article className="overview-summary-card"><span>Uploaded datasets</span><strong>{loadingHistory ? "—" : datasets.length}</strong><small>Workbooks in your workspace</small></article>
+        <article className="overview-summary-card"><span>Processed datasets</span><strong>{loadingHistory ? "—" : datasets.filter((item) => item.processing_status === "processed").length}</strong><small>Ready for profiling</small></article>
+        <article className="overview-summary-card"><span>Profiles completed</span><strong>{loadingHistory ? "—" : datasets.filter((item) => item.understanding_status === "understood").length}</strong><small>Datasets with generated profiles</small></article>
+        <article className="overview-summary-card"><span>Analytics generated</span><strong>{loadingHistory ? "—" : datasets.filter((item) => item.analytics_status === "analysed").length}</strong><small>Datasets with analytics results</small></article>
       </section>
+      <section className="overview-section">
+        <div className="overview-section-heading">
+          <div><h2>Recent datasets</h2><p>Continue working with a recently uploaded workbook.</p></div>
+          <button className="secondary-button" onClick={() => navigate("/datasets")}>View all datasets →</button>
+        </div>
+        {loadingHistory ? <div className="history-card"><p className="empty-message">Loading your datasets...</p></div>
+          : historyError ? <div className="status-message error" role="alert">{historyError}</div>
+          : datasets.length === 0 ? (
+            <div className="overview-empty-card">
+              <strong>Your workspace is ready for its first dataset.</strong>
+              <p>Upload an Excel workbook to start processing, profiling and analytics.</p>
+              <button className="upload-button" onClick={() => navigate("/upload")}>Upload your first dataset</button>
+            </div>
+          ) : (
+            <div className="overview-recent-list">
+              {datasets.slice(0, 5).map((dataset) => (
+                <div className="overview-recent-row" key={dataset.dataset_id}>
+                  <div className="overview-file-icon">▤</div>
+                  <div className="overview-recent-copy"><strong>{dataset.filename}</strong><span>{dataset.status || "Uploaded"}</span></div>
+                  <button className="secondary-button" onClick={() => navigate(`/datasets/${encodeURIComponent(dataset.dataset_id)}/processing`)}>Open →</button>
+                </div>
+              ))}
+            </div>
+          )}
+      </section>
+    </div>
+  );
 
-    </main>
+  return (
+    <AppLayout pageContent={{ upload: uploadPage, datasets: datasetsPage, processing: stagePage, profile: stagePage, analytics: stagePage }}>
+      {overviewPage}
+    </AppLayout>
   );
 }
 

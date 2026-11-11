@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.core.database import get_db_connection
+from app.core.dataset_state import ensure_state_schema, save_dataset_stage, load_processing_artifact
 from app.modules.data_understanding import profile_dataset
 from app.modules.excel_ingestion import ExcelIngestionError
 from app.modules.workbook_processing import process_workbook
@@ -34,7 +35,7 @@ def _get_safe_storage_path(storage_path: str) -> Path:
     response_model=DatasetProfile,
     summary="Generate a structured profile for an already processed dataset",
 )
-def understand_dataset(dataset_id: str) -> DatasetProfile:
+def understand_dataset(dataset_id: str, force: bool = Query(False, description='Regenerate the dataset profile.')) -> DatasetProfile:
     """Re-run Module 2 and profile its cleaned DataFrames using Module 3.
 
     The uploaded workbook remains unchanged. DataFrames are created in memory
@@ -47,7 +48,7 @@ def understand_dataset(dataset_id: str) -> DatasetProfile:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT filename, storage_path, status
+                    SELECT filename, storage_path, status, understanding_result
                     FROM datasets
                     WHERE dataset_id = %s;
                     """,
@@ -58,7 +59,10 @@ def understand_dataset(dataset_id: str) -> DatasetProfile:
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found.")
 
-        filename, storage_path, dataset_status = dataset
+        ensure_state_schema()
+        filename, storage_path, dataset_status, cached_profile = dataset
+        if cached_profile and not force:
+            return cached_profile
 
         if dataset_status != "processed":
             raise HTTPException(
@@ -76,7 +80,7 @@ def understand_dataset(dataset_id: str) -> DatasetProfile:
         try:
             # Module 2 is deliberately reused as the single source of truth
             # for ingestion, normalisation and cleaning.
-            processing_result = process_workbook(file_path)
+            processing_result = load_processing_artifact(dataset_id) or process_workbook(file_path)
         except FileNotFoundError as exc:
             raise HTTPException(
                 status_code=404,
@@ -106,7 +110,12 @@ def understand_dataset(dataset_id: str) -> DatasetProfile:
 
         # Module 2 sees the stored filename (workbook.xlsx); expose the
         # original user-facing filename in the API response instead.
-        return profile.model_copy(update={"filename": filename})
+        profile = profile.model_copy(update={"filename": filename})
+        try:
+            save_dataset_stage(dataset_id, "understanding_result", profile, "understood_at")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Profile generated, but could not be saved.") from exc
+        return profile
 
     except HTTPException:
         raise

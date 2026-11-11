@@ -370,7 +370,7 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value (true/false).")
 
 
-def create_groq_client() -> GroqClient:
+def create_groq_client(model: str | None = None) -> GroqClient:
     """Create the configured Groq client using environment variables."""
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
@@ -390,7 +390,7 @@ def create_groq_client() -> GroqClient:
 
     return GroqClient(
         api_key=api_key,
-        model=os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+        model=model or os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL),
         base_url=os.getenv("GROQ_BASE_URL", DEFAULT_GROQ_BASE_URL),
         timeout_seconds=timeout_seconds,
         temperature=temperature,

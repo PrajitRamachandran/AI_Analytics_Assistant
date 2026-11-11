@@ -129,25 +129,25 @@ def register_llm_provider(
     _PROVIDER_FACTORIES[name.strip().lower()] = factory
 
 
-def _ollama_factory() -> PlanLLMClient:
+def _ollama_factory(model: str | None = None) -> PlanLLMClient:
     # Import lazily to avoid loading provider implementations unnecessarily.
     from app.modules.analytics_planner.ollama_client import create_ollama_client
 
-    return create_ollama_client()
+    return create_ollama_client(model=model)
 
 
-def _groq_factory() -> PlanLLMClient:
+def _groq_factory(model: str | None = None) -> PlanLLMClient:
     # Import lazily because GroqClient imports the shared error definitions above.
     from app.modules.analytics_planner.groq_client import create_groq_client
 
-    return create_groq_client()
+    return create_groq_client(model=model)
 
 
 register_llm_provider("ollama", _ollama_factory)
 register_llm_provider("groq", _groq_factory)
 
 
-def create_llm_client(provider: Optional[str] = None) -> PlanLLMClient:
+def create_llm_client(provider: Optional[str] = None, model: Optional[str] = None) -> PlanLLMClient:
     """
     Create the configured LLM client.
 
@@ -176,4 +176,4 @@ def create_llm_client(provider: Optional[str] = None) -> PlanLLMClient:
             f"Registered providers: {available}."
         )
 
-    return factory()
+    return factory() if model is None else factory(model)

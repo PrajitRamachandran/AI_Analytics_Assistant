@@ -292,7 +292,7 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value (true/false).")
 
 
-def create_ollama_client() -> OllamaClient:
+def create_ollama_client(model: str | None = None) -> OllamaClient:
     """Create the V1 Ollama client, with optional environment overrides."""
     try:
         timeout_seconds = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
@@ -304,7 +304,7 @@ def create_ollama_client() -> OllamaClient:
 
     return OllamaClient(
         base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-        model=os.getenv("OLLAMA_MODEL", "qwen3.5:4b"),
+        model=model or os.getenv("OLLAMA_MODEL", "qwen3.5:4b"),
         timeout_seconds=timeout_seconds,
         temperature=temperature,
         context_length=context_length,

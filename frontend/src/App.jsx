@@ -40,10 +40,15 @@ function App() {
   const [processingId, setProcessingId] = useState(null);
   const [profilingId, setProfilingId] = useState(null);
   const [analyticsId, setAnalyticsId] = useState(null);
+  const [analyticsRequest, setAnalyticsRequest] = useState("");
   const [workflowError, setWorkflowError] = useState("");
 
   const activeDataset = datasets.find((item) => String(item.dataset_id) === String(route.datasetId)) || null;
   const activeWorkflow = activeDataset ? workflowByDataset[activeDataset.dataset_id] || {} : {};
+
+  useEffect(() => {
+    setAnalyticsRequest("");
+  }, [activeDataset?.dataset_id]);
 
   const updateWorkflow = (datasetId, patch) => {
     setWorkflowByDataset((current) => ({
@@ -89,7 +94,11 @@ function App() {
     setAnalyticsId(dataset.dataset_id);
     setWorkflowError("");
     try {
-      const response = await api.post(`/api/datasets/${dataset.dataset_id}/analytics${force ? "?force=true" : ""}`, undefined, { timeout: 21 * 60 * 1000 });
+      const response = await api.post(
+        `/api/datasets/${dataset.dataset_id}/analytics${force ? "?force=true" : ""}`,
+        { user_request: analyticsRequest.trim() || null },
+        { timeout: 21 * 60 * 1000 },
+      );
       updateWorkflow(dataset.dataset_id, { analyticsResult: response.data, analyticsSavedAt: new Date().toISOString() });
       saveWorkflowResult(dataset.dataset_id, "analytics", response.data).catch((storageError) => console.warn("Could not persist analytics results:", storageError));
       await fetchDatasets();
@@ -427,7 +436,28 @@ function App() {
           {stage === "analytics" && (
             <>
               <AnalyticsModelSelector />
-              <div className="workflow-action-strip"><div><strong>Analytics generation</strong><span>Generate dataset-specific KPIs, charts and insights.</span></div><button className="primary-button compact-action" onClick={() => handleGenerateAnalytics(stageDataset, Boolean(activeWorkflow.analyticsResult))} disabled={!(activeWorkflow.processingResult || stageDataset.processing_status === "processed") || analyticsId === stageDataset.dataset_id}>{analyticsId === stageDataset.dataset_id ? "Generating…" : activeWorkflow.analyticsResult ? "Regenerate analytics" : "Generate analytics"}</button></div>
+              <section className="analytics-request-panel">
+                <label htmlFor="analytics-user-request">What would you like to know about this data?</label>
+                <textarea
+                  id="analytics-user-request"
+                  value={analyticsRequest}
+                  onChange={(event) => setAnalyticsRequest(event.target.value)}
+                  placeholder="E.g. Show total sales from January 2025 to June 2025 and compare monthly revenue."
+                  maxLength={2000}
+                  rows={3}
+                  disabled={analyticsId === stageDataset.dataset_id}
+                />
+                <div className="analytics-request-footer">
+                  <span>Leave this empty to generate the usual automatic analytics.</span>
+                  <button
+                    className="primary-button compact-action"
+                    onClick={() => handleGenerateAnalytics(stageDataset, Boolean(activeWorkflow.analyticsResult))}
+                    disabled={!(activeWorkflow.processingResult || stageDataset.processing_status === "processed") || analyticsId === stageDataset.dataset_id}
+                  >
+                    {analyticsId === stageDataset.dataset_id ? "Generating…" : analyticsRequest.trim() ? "Generate requested analytics" : activeWorkflow.analyticsResult ? "Regenerate analytics" : "Generate analytics"}
+                  </button>
+                </div>
+              </section>
               {activeWorkflow.analyticsResult ? <AnalyticsDashboard result={activeWorkflow.analyticsResult} /> : <div className="workflow-empty-state"><h2>{analyticsId === stageDataset.dataset_id ? "Generating analytics…" : "No analytics generated yet"}</h2><p>Process this dataset first, then generate its analytics using the configured planner.</p>{!activeWorkflow.processingResult && <button className="secondary-button compact-action" onClick={() => navigate(`/datasets/${encodeURIComponent(stageDataset.dataset_id)}/processing`)}>Go to processing</button>}</div>}
             </>
           )}

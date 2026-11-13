@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterCharts, formatMetric } from "./analyticsUtils.js";
+import { filterCharts, formatMetric, getChartTypes } from "./analyticsUtils.js";
 
 const charts = [
   { id: "a", title: "Revenue by month", chart_type: "line", worksheet_name: "Sales" },
@@ -22,4 +22,10 @@ test("returns no charts for unmatched queries and formats KPI values", () => {
   assert.deepEqual(filterCharts(charts, "not found"), []);
   assert.equal(formatMetric(12500.126), "12,500.13");
   assert.equal(formatMetric(null), "—");
+});
+
+test("discovers chart filter options from actual chart payloads", () => {
+  assert.deepEqual(getChartTypes([...charts, { chart_type: "heatmap" }, { chart_type: "bar" }]), [
+    "bar", "donut", "heatmap", "line",
+  ]);
 });

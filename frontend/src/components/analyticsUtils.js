@@ -15,3 +15,9 @@ export function formatMetric(value) {
   }
   return String(value);
 }
+
+export function getChartTypes(charts) {
+  return [...new Set((Array.isArray(charts) ? charts : [])
+    .map((chart) => chart?.chart_type)
+    .filter((type) => typeof type === "string" && type.trim()))].sort();
+}

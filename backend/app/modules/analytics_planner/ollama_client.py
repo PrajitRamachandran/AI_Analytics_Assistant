@@ -44,6 +44,81 @@ class OllamaSchemaValidationError(OllamaResponseError, PlanSchemaValidationError
     """Ollama returned JSON that failed the shared analytics-plan schema."""
 
 
+
+
+def _normalize_plan_payload(payload: Any) -> Any:
+    """Repair common small-model field mistakes before strict Pydantic validation.
+
+    This is deliberately conservative: invalid optional filters are discarded,
+    and unusable scatter operations (identical axes) plus their dependent
+    visualizations are removed. Dataset-aware validation still runs later in
+    AnalyticsPlanner; this helper does not invent columns or values.
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized = dict(payload)
+
+    filters = normalized.get("filters")
+    if isinstance(filters, list):
+        valid_filters = []
+        for item in filters:
+            if not isinstance(item, dict):
+                continue
+            start = item.get("start_date")
+            end = item.get("end_date")
+            try:
+                from datetime import date
+
+                if not isinstance(start, str) or not isinstance(end, str):
+                    continue
+                # Enforce real ISO calendar dates, not merely string length.
+                date.fromisoformat(start)
+                date.fromisoformat(end)
+                if len(start) != 10 or len(end) != 10:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            valid_filters.append(item)
+        normalized["filters"] = valid_filters
+
+    operations = normalized.get("operations")
+    if isinstance(operations, list):
+        invalid_scatter_ids = set()
+        valid_operations = []
+        for operation in operations:
+            if not isinstance(operation, dict):
+                valid_operations.append(operation)
+                continue
+            if operation.get("operation_type") == "scatter":
+                x_column = operation.get("x_column")
+                y_column = operation.get("y_column")
+                if (
+                    isinstance(x_column, str)
+                    and isinstance(y_column, str)
+                    and x_column == y_column
+                ):
+                    operation_id = operation.get("id")
+                    if isinstance(operation_id, str):
+                        invalid_scatter_ids.add(operation_id)
+                    continue
+            valid_operations.append(operation)
+        normalized["operations"] = valid_operations
+
+        if invalid_scatter_ids:
+            visualizations = normalized.get("visualizations")
+            if isinstance(visualizations, list):
+                normalized["visualizations"] = [
+                    item for item in visualizations
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("operation_id") in invalid_scatter_ids
+                    )
+                ]
+
+    return normalized
+
+
 class OllamaClient:
     """Communicate with a locally running Ollama model."""
 
@@ -290,7 +365,7 @@ class OllamaClient:
         logger.info("OLLAMA RAW MODEL OUTPUT END | model=%s", self.model)
 
         try:
-            parsed_json = json.loads(content)
+            parsed_json = _normalize_plan_payload(json.loads(content))
         except (TypeError, ValueError) as exc:
             raise OllamaResponseError(
                 "Ollama did not return valid JSON content."

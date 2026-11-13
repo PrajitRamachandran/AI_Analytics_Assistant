@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { filterCharts } from "./analyticsUtils";
+import { filterCharts, getChartTypes } from "./analyticsUtils";
 import "./AnalyticsDashboard.css";
 
 function formatNumber(value) {
@@ -10,7 +10,7 @@ function formatNumber(value) {
 
 function safeData(chart) {
   return Array.isArray(chart?.data)
-    ? chart.data.filter((point) => Number.isFinite(point?.value))
+    ? chart.data.filter((point) => Number.isFinite(point?.value) && point?.label !== undefined)
     : [];
 }
 
@@ -156,15 +156,99 @@ function DataTable({ chart }) {
   );
 }
 
+function HistogramChart({ chart }) {
+  const data = safeData(chart);
+  const max = Math.max(...data.map((point) => point.value), 1);
+  const width = 820;
+  const height = 300;
+  const left = 54;
+  const right = 24;
+  const top = 22;
+  const bottom = 74;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const slot = data.length ? plotWidth / data.length : plotWidth;
+  return (
+    <svg className="analytics-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+      {[0, 1, 2, 3].map((tick) => {
+        const value = (max * tick) / 3;
+        const y = top + plotHeight - (value / max) * plotHeight;
+        return <g key={tick}>
+          <line x1={left} x2={width - right} y1={y} y2={y} className="chart-grid-line" />
+          <text x={left - 8} y={y + 4} textAnchor="end" className="chart-axis-label">{formatNumber(value)}</text>
+        </g>;
+      })}
+      {data.map((point, index) => {
+        const barHeight = (point.value / max) * plotHeight;
+        const x = left + index * slot + slot * 0.08;
+        return <g key={`${point.label}-${index}`}>
+          <rect x={x} y={top + plotHeight - barHeight} width={Math.max(1, slot * 0.84)} height={barHeight} rx="3" className="chart-bar" />
+          <text x={x + slot * 0.42} y={height - 45} textAnchor="middle" className="chart-axis-label">{String(point.label).slice(0, 18)}</text>
+        </g>;
+      })}
+    </svg>
+  );
+}
+
+function ScatterChart({ chart }) {
+  const points = Array.isArray(chart.scatter_data) ? chart.scatter_data : [];
+  if (!points.length) return <div className="analytics-empty-filter">No valid numeric pairs to plot.</div>;
+  const width = 820;
+  const height = 300;
+  const left = 66;
+  const right = 24;
+  const top = 20;
+  const bottom = 52;
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const rangeX = maxX - minX || 1;
+  const rangeY = maxY - minY || 1;
+  const px = (v) => left + ((v - minX) / rangeX) * (width - left - right);
+  const py = (v) => top + ((maxY - v) / rangeY) * (height - top - bottom);
+  return (
+    <svg className="analytics-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={chart.title}>
+      {[0, 1, 2, 3].map((tick) => {
+        const yValue = minY + (rangeY * tick) / 3;
+        const yy = py(yValue);
+        return <g key={tick}>
+          <line x1={left} x2={width - right} y1={yy} y2={yy} className="chart-grid-line" />
+          <text x={left - 9} y={yy + 4} textAnchor="end" className="chart-axis-label">{formatNumber(yValue)}</text>
+        </g>;
+      })}
+      {points.map((point, index) => <circle key={index} cx={px(point.x)} cy={py(point.y)} r="4" className="chart-scatter-dot">
+        <title>{`${chart.x_label}: ${formatNumber(point.x)} · ${chart.y_label}: ${formatNumber(point.y)}`}</title>
+      </circle>)}
+      <text x={width / 2} y={height - 10} textAnchor="middle" className="chart-axis-label">{chart.x_label}</text>
+      <text x="14" y={height / 2} transform={`rotate(-90 14 ${height / 2})`} textAnchor="middle" className="chart-axis-label">{chart.y_label}</text>
+    </svg>
+  );
+}
+
 function ChartRenderer({ chart }) {
+  const hasData = chart.chart_type === "scatter"
+    ? Array.isArray(chart.scatter_data) && chart.scatter_data.some((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y))
+    : chart.chart_type === "table"
+      ? Array.isArray(chart.table_data) && chart.table_data.length > 0
+      : safeData(chart).length > 0;
+
+  if (!hasData) {
+    return <div className="analytics-empty-filter">This analysis returned no valid values to visualise.</div>;
+  }
+
   switch (chart.chart_type) {
     case "line": return <TrendChart chart={chart} />;
     case "area": return <TrendChart chart={chart} area />;
     case "pie": return <PieChart chart={chart} />;
     case "donut": return <PieChart chart={chart} donut />;
     case "table": return <DataTable chart={chart} />;
-    case "bar":
-    default: return <BarChart chart={chart} />;
+    case "scatter": return <ScatterChart chart={chart} />;
+    case "histogram": return <HistogramChart chart={chart} />;
+    case "bar": return <BarChart chart={chart} />;
+    // Unknown future chart types remain inspectable as a table instead of
+    // being silently misrepresented as a bar chart.
+    default: return <DataTable chart={chart} />;
   }
 }
 
@@ -174,6 +258,10 @@ export default function AnalyticsDashboard({ result }) {
   const charts = useMemo(
     () => filterCharts(result?.charts || [], chartQuery, chartType),
     [result?.charts, chartQuery, chartType],
+  );
+  const availableChartTypes = useMemo(
+    () => getChartTypes(result?.charts),
+    [result?.charts],
   );
   if (!result) return null;
 
@@ -187,6 +275,13 @@ export default function AnalyticsDashboard({ result }) {
         </div>
         <span className="analytics-status">Analysis complete</span>
       </div>
+
+      {result.user_request && (
+        <div className="analytics-request-summary">
+          <strong>Requested analysis</strong>
+          <p>{result.user_request}</p>
+        </div>
+      )}
 
       <div className="analytics-kpi-grid">
         {(result.kpis || []).map((kpi) => (
@@ -213,9 +308,9 @@ export default function AnalyticsDashboard({ result }) {
                 <span className="sr-only">Filter chart type</span>
                 <select value={chartType} onChange={(event) => setChartType(event.target.value)}>
                   <option value="all">All chart types</option>
-                  <option value="bar">Bar</option><option value="line">Line</option>
-                  <option value="area">Area</option><option value="pie">Pie</option>
-                  <option value="donut">Donut</option><option value="table">Table</option>
+                  {availableChartTypes.map((type) => (
+                    <option value={type} key={type}>{type.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())}</option>
+                  ))}
                 </select>
               </label>
             </div>
@@ -239,7 +334,12 @@ export default function AnalyticsDashboard({ result }) {
         </>
       ) : (
         <div className="status-message info">
-          Analytics completed, but this workbook did not produce a chartable grouped result. This can happen when the available columns are descriptive text, identifiers, or scalar-only measures.
+          {result.user_request
+            ? "No chartable analysis could be generated for this request using the available dataset columns."
+            : "Analytics completed, but this workbook did not produce a chartable grouped result. This can happen when the available columns are descriptive text, identifiers, or scalar-only measures."}
+          {result.plan?.limitations?.length > 0 && (
+            <ul>{result.plan.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>
+          )}
         </div>
       )}
 

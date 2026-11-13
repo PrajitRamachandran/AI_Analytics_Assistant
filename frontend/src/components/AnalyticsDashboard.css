@@ -78,3 +78,5 @@
   .analytics-chart-filters { width:100%; flex-direction:column; align-items:stretch; }
   .analytics-search input, .analytics-type-filter select { width:100%; }
 }
+
+.chart-scatter-dot { fill: var(--chart-primary, #2196b8); stroke: rgba(255,255,255,.45); stroke-width: 1; }

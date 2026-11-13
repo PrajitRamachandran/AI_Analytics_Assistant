@@ -1,7 +1,9 @@
 """End-to-end Module 4 planning and deterministic analytics execution API."""
 from pathlib import Path
+import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.core.database import get_db_connection
 from app.core.dataset_state import ensure_state_schema, save_dataset_stage, get_selected_model, load_processing_artifact
@@ -24,6 +26,7 @@ from app.modules.excel_ingestion import ExcelIngestionError
 from app.modules.workbook_processing import process_workbook
 from app.schemas.data_understanding import DatasetProfile
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Analytics"])
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
 
@@ -40,8 +43,15 @@ def _safe_workbook_path(storage_path: str) -> Path:
     "/datasets/{dataset_id}/analytics",
     summary="Generate a validated analytics plan and execute it",
 )
-def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, description='Regenerate analytics.')) -> dict:
-    """Run Modules 2–5 in one request and return deterministic chart data."""
+def generate_dataset_analytics(
+    dataset_id: str,
+    force: Annotated[bool, Query(description="Regenerate analytics.")] = False,
+    user_request: Annotated[str | None, Body(embed=True)] = None,
+) -> dict:
+    """Generate automatic or user-requested analytics and return deterministic chart data."""
+    user_request = (user_request or "").strip() or None
+    if user_request and len(user_request) > 2000:
+        raise HTTPException(status_code=422, detail="Analytics request must be 2,000 characters or fewer.")
     try:
         ensure_state_schema()
         with get_db_connection() as connection:
@@ -61,7 +71,9 @@ def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, descr
 
         
         filename, storage_path, status, cached_analytics, cached_profile = dataset
-        if cached_analytics and not force:
+        # A previous automatic result must never override a new user request.
+        # Request-specific results are not stored in the dataset-wide cache.
+        if cached_analytics and not force and not user_request:
             return {**cached_analytics, "cached": True, "message": "Previously generated analytics restored from PostgreSQL."}
         if status != "processed":
             raise HTTPException(
@@ -102,7 +114,12 @@ def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, descr
             provider=selected_model.get("provider") or None,
             model=selected_model.get("model") or None,
         )
-        plan = AnalyticsPlanner(plan_generator=plan_generator).generate_plan(profile)
+        planner = AnalyticsPlanner(plan_generator=plan_generator)
+        plan = (
+            planner.generate_plan(profile, user_request=user_request)
+            if user_request
+            else planner.generate_plan(profile)
+        )
 
         # Keep reference/documentation sheets in the workbook plan and
         # worksheet count, but exclude them from business row totals and
@@ -121,6 +138,8 @@ def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, descr
             output = execute_analytics_plan(
                 analytical_worksheets,
                 plan,
+                only_recommended_charts=bool(user_request),
+                include_default_rows_kpi=not bool(user_request),
             )
         except AnalyticsExecutionError as exc:
             raise HTTPException(
@@ -132,10 +151,12 @@ def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, descr
         output["dataset_id"] = dataset_id
         output["execution_status"] = "success"
         output["cached"] = False
-        try:
-            save_dataset_stage(dataset_id, "analytics_result", output, "analysed_at")
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail="Analytics generated, but results could not be persisted.") from exc
+        output["user_request"] = user_request
+        if not user_request:
+            try:
+                save_dataset_stage(dataset_id, "analytics_result", output, "analysed_at")
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail="Analytics generated, but results could not be persisted.") from exc
         return output
 
     except HTTPException:
@@ -162,6 +183,7 @@ def generate_dataset_analytics(dataset_id: str, force: bool = Query(False, descr
             detail=f"Analytics planning failed: {exc}",
         ) from exc
     except Exception as exc:
+        logger.exception("Unexpected failure while generating dataset analytics.")
         raise HTTPException(
             status_code=500,
             detail="Unable to generate analytics for this workbook.",

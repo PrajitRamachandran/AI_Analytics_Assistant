@@ -64,6 +64,7 @@ ChartType = Literal[
     "pie",
     "donut",
     "scatter",
+    "histogram",
     "table",
 ]
 
@@ -447,6 +448,31 @@ class ComparisonOperation(BaseAnalyticalOperation):
         return self
 
 
+class ScatterOperation(BaseAnalyticalOperation):
+    """Return paired numeric observations for a scatter visualization."""
+
+    operation_type: Literal["scatter"]
+
+    x_column: str = Field(min_length=1)
+    y_column: str = Field(min_length=1)
+    sample_limit: int = Field(default=1000, ge=10, le=5000)
+
+    @model_validator(mode="after")
+    def validate_distinct_axes(self):
+        if self.x_column == self.y_column:
+            raise ValueError("Scatter x_column and y_column must be different.")
+        return self
+
+
+class HistogramOperation(BaseAnalyticalOperation):
+    """Bin one numeric measure into a frequency distribution."""
+
+    operation_type: Literal["histogram"]
+
+    column: str = Field(min_length=1)
+    bins: int = Field(default=10, ge=3, le=30)
+
+
 # ============================================================
 # ANALYTICAL OPERATION UNION
 # ============================================================
@@ -465,6 +491,8 @@ AnalyticalOperation = Annotated[
         TimeSeriesOperation,
         PercentageOfTotalOperation,
         ComparisonOperation,
+        ScatterOperation,
+        HistogramOperation,
     ],
     Field(discriminator="operation_type"),
 ]
@@ -752,6 +780,15 @@ def _derive_scalar_operation(
 
 
 # ============================================================
+class DateRangeFilter(AnalyticsPlanModel):
+    """Inclusive date filter applied before executing worksheet operations."""
+
+    worksheet_name: str = Field(min_length=1, max_length=255)
+    column: str = Field(min_length=1, max_length=255)
+    start_date: str = Field(min_length=10, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str = Field(min_length=10, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
 # COMPLETE WORKBOOK-LEVEL ANALYTICAL PLAN
 # ============================================================
 
@@ -779,6 +816,9 @@ class WorkbookAnalyticsPlan(AnalyticsPlanModel):
         min_length=1,
         max_length=30,
     )
+
+    # Optional user-requested filters. Empty in automatic analytics mode.
+    filters: list[DateRangeFilter] = Field(default_factory=list, max_length=10)
 
     operations: list[AnalyticalOperation] = Field(
         default_factory=list,

@@ -16,6 +16,7 @@ from app.schemas.analytics_plan import (
     DistinctCountOperation, GroupByOperation, MaxOperation, MinOperation,
     PercentageOfTotalOperation, ScalarOperation, SumOperation,
     TimeSeriesOperation, TopNOperation, WorkbookAnalyticsPlan,
+    ScatterOperation, HistogramOperation,
 )
 
 
@@ -224,6 +225,39 @@ def _execute_comparison(frame: pd.DataFrame, operation: ComparisonOperation) -> 
     return rows
 
 
+def _execute_histogram(frame: pd.DataFrame, operation: HistogramOperation) -> list[dict]:
+    values = pd.to_numeric(frame[operation.column], errors="coerce")
+    values = values[np.isfinite(values.astype(float, copy=False))].dropna()
+    if values.empty:
+        return []
+    counts, edges = np.histogram(values.to_numpy(dtype=float), bins=operation.bins)
+    return [
+        {
+            "bin": f"{edges[index]:g} – {edges[index + 1]:g}",
+            "count": int(counts[index]),
+            "bin_start": float(edges[index]),
+            "bin_end": float(edges[index + 1]),
+        }
+        for index in range(len(counts))
+    ]
+
+
+def _execute_scatter(frame: pd.DataFrame, operation: ScatterOperation) -> list[dict]:
+    x_values = pd.to_numeric(frame[operation.x_column], errors="coerce")
+    y_values = pd.to_numeric(frame[operation.y_column], errors="coerce")
+    working = pd.DataFrame({"x": x_values, "y": y_values}).replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+    if len(working) > operation.sample_limit:
+        # Deterministic evenly spaced sampling avoids random dashboard changes.
+        indexes = np.linspace(0, len(working) - 1, operation.sample_limit, dtype=int)
+        working = working.iloc[indexes]
+    return [
+        {"x": float(row.x), "y": float(row.y)}
+        for row in working.itertuples(index=False)
+    ]
+
+
 def execute_operation(worksheets: dict[str, pd.DataFrame], operation: Any) -> dict:
     """Execute one validated operation and return JSON-safe records."""
     frame = worksheets.get(operation.worksheet_name)
@@ -243,6 +277,10 @@ def execute_operation(worksheets: dict[str, pd.DataFrame], operation: Any) -> di
         records = _execute_percentage(frame, operation)
     elif isinstance(operation, ComparisonOperation):
         records = _execute_comparison(frame, operation)
+    elif isinstance(operation, HistogramOperation):
+        records = _execute_histogram(frame, operation)
+    elif isinstance(operation, ScatterOperation):
+        records = _execute_scatter(frame, operation)
     else:
         raise AnalyticsExecutionError(f"Unsupported operation type: {operation.operation_type}")
     return {
@@ -259,6 +297,10 @@ def _chart_axes(operation: Any, aggregation_index: int = 0) -> tuple[str, str, s
     """Return x key, y key, and a safe default chart type for an operation."""
     if isinstance(operation, TimeSeriesOperation):
         return "period", operation.metric.alias, "line"
+    if isinstance(operation, HistogramOperation):
+        return "bin", "count", "histogram"
+    if isinstance(operation, ScatterOperation):
+        return "x", "y", "scatter"
     if isinstance(operation, GroupByOperation):
         if aggregation_index >= len(operation.aggregations):
             return None
@@ -315,6 +357,39 @@ def _chart_from_result(
         return None
     x_key, y_key, default_type = axes
     records = result["records"]
+    if isinstance(operation, ScatterOperation):
+        scatter_data = [
+            {"x": row.get("x"), "y": row.get("y")}
+            for row in records
+            if isinstance(row.get("x"), (int, float))
+            and isinstance(row.get("y"), (int, float))
+            and math.isfinite(float(row["x"]))
+            and math.isfinite(float(row["y"]))
+        ]
+        if not scatter_data:
+            return None
+        chart_id = recommendation.id if recommendation else f"auto_{operation.id}"
+        return {
+            "id": chart_id,
+            "operation_id": operation.id,
+            "title": recommendation.title if recommendation else operation.title,
+            "chart_type": "scatter",
+            "description": recommendation.description if recommendation else operation.description,
+            "insight": "Each point represents one paired observation. No correlation or causal conclusion is inferred.",
+            "priority": recommendation.priority if recommendation else "medium",
+            "worksheet_name": operation.worksheet_name,
+            "x_label": operation.x_column,
+            "y_label": operation.y_column,
+            "scatter_data": scatter_data,
+            "data": [],
+            "table_columns": [operation.x_column, operation.y_column],
+            "table_data": [
+                {operation.x_column: point["x"], operation.y_column: point["y"]}
+                for point in scatter_data[:100]
+            ],
+            "table_truncated": len(scatter_data) > 100,
+        }
+
     points = []
     for row in records:
         value = row.get(y_key)
@@ -334,7 +409,7 @@ def _chart_from_result(
         chart_type = "bar"
     if chart_type in {"line", "area"} and len(points) < 2:
         return None
-    if chart_type not in {"bar", "line", "area", "pie", "donut", "table"}:
+    if chart_type not in {"bar", "line", "area", "pie", "donut", "table", "histogram"}:
         chart_type = default_type
 
     if default_type == "bar":
@@ -371,12 +446,41 @@ def _chart_from_result(
     }
 
 
-def execute_analytics_plan(worksheets: dict[str, pd.DataFrame], plan: WorkbookAnalyticsPlan) -> dict:
-    """Execute every operation and materialize every compatible chart recommendation."""
+def _apply_plan_filters(
+    worksheets: dict[str, pd.DataFrame],
+    filters: list[Any],
+) -> dict[str, pd.DataFrame]:
+    """Apply validated inclusive date filters before any analytical operation."""
+    filtered = {name: frame.copy() for name, frame in worksheets.items()}
+    for item in filters:
+        frame = filtered.get(item.worksheet_name)
+        if frame is None:
+            raise AnalyticsExecutionError(
+                f"Worksheet '{item.worksheet_name}' is unavailable for filtering."
+            )
+        dates = pd.to_datetime(
+            frame[item.column], errors="coerce", format="mixed", utc=True,
+        )
+        start = pd.Timestamp(item.start_date, tz="UTC")
+        end_exclusive = pd.Timestamp(item.end_date, tz="UTC") + pd.Timedelta(days=1)
+        mask = dates.ge(start) & dates.lt(end_exclusive)
+        filtered[item.worksheet_name] = frame.loc[mask].copy()
+    return filtered
+
+
+def execute_analytics_plan(
+    worksheets: dict[str, pd.DataFrame],
+    plan: WorkbookAnalyticsPlan,
+    *,
+    only_recommended_charts: bool = False,
+    include_default_rows_kpi: bool = True,
+) -> dict:
+    """Execute a validated plan and materialize its compatible chart recommendations."""
+    execution_worksheets = _apply_plan_filters(worksheets, plan.filters)
     results = []
     result_by_id = {}
     for operation in plan.operations:
-        result = execute_operation(worksheets, operation)
+        result = execute_operation(execution_worksheets, operation)
         results.append(result)
         result_by_id[operation.id] = result
 
@@ -402,7 +506,7 @@ def execute_analytics_plan(worksheets: dict[str, pd.DataFrame], plan: WorkbookAn
                     )
                     if chart:
                         charts.append(chart)
-            else:
+            elif not only_recommended_charts:
                 chart = _chart_from_result(
                     operation, result_by_id[operation.id], None,
                     aggregation_index=aggregation_index,
@@ -410,17 +514,68 @@ def execute_analytics_plan(worksheets: dict[str, pd.DataFrame], plan: WorkbookAn
                 if chart:
                     charts.append(chart)
 
-    kpis = [{
-        "id": "rows_analyzed",
-        "label": "Rows analyzed",
-        "value": sum(len(frame) for frame in worksheets.values()),
-        "format_hint": "integer",
-    }]
+    kpis = []
+    if include_default_rows_kpi:
+        kpis.append({
+            "id": "rows_analyzed",
+            "label": "Rows analyzed",
+            "value": sum(len(frame) for frame in execution_worksheets.values()),
+            "format_hint": "integer",
+        })
+    operations_by_id = {operation.id: operation for operation in plan.operations}
     for result in results:
         if "value" in result:
+            operation = operations_by_id.get(result["operation_id"])
+            label = result.get("title", result.get("result_name", "Metric"))
+            label_text = str(label).lower()
+            # A scalar max/min is a row-level extreme. Never present it as a
+            # highest/lowest-performing region, product, or other category.
+            category_extreme = (
+                isinstance(operation, (MaxOperation, MinOperation))
+                and any(token in label_text for token in (
+                    "highest performing", "lowest performing",
+                    "top performing", "bottom performing",
+                    "best performing", "worst performing",
+                ))
+            )
+            if category_extreme:
+                wants_high = isinstance(operation, MaxOperation) or any(
+                    token in label_text for token in ("highest", "top performing", "best performing")
+                )
+                candidates = []
+                for grouped_operation in plan.operations:
+                    if not isinstance(grouped_operation, GroupByOperation):
+                        continue
+                    if grouped_operation.worksheet_name != operation.worksheet_name:
+                        continue
+                    for aggregation in grouped_operation.aggregations:
+                        if aggregation.column != operation.column or aggregation.function != "sum":
+                            continue
+                        for group_column in grouped_operation.group_by_columns:
+                            if group_column.lower().replace("_", " ") in label_text:
+                                grouped_result = result_by_id.get(grouped_operation.id, {})
+                                for row in grouped_result.get("records", []):
+                                    value = row.get(aggregation.alias)
+                                    category = row.get(group_column)
+                                    if isinstance(value, (int, float)) and category is not None:
+                                        candidates.append((value, category))
+                if candidates:
+                    extreme_value, category = (
+                        max(candidates, key=lambda item: item[0])
+                        if wants_high else min(candidates, key=lambda item: item[0])
+                    )
+                    kpis.append({
+                        "id": f"operation_{result['operation_id']}",
+                        "label": f"{label} ({category})",
+                        "value": extreme_value,
+                        "format_hint": "number",
+                    })
+                # If there is no matching grouped aggregation, omit the
+                # misleading row-level extreme rather than displaying it.
+                continue
             kpis.append({
                 "id": f"operation_{result['operation_id']}",
-                "label": result.get("title", result.get("result_name", "Metric")),
+                "label": label,
                 "value": result["value"],
                 "format_hint": "number",
             })
@@ -430,6 +585,7 @@ def execute_analytics_plan(worksheets: dict[str, pd.DataFrame], plan: WorkbookAn
         "results": results,
         "kpis": kpis,
         "charts": charts,
-        "worksheet_count": len(worksheets),
-        "row_count": sum(len(frame) for frame in worksheets.values()),
+        "worksheet_count": len(execution_worksheets),
+        "row_count": sum(len(frame) for frame in execution_worksheets.values()),
+        "filters_applied": [item.model_dump(mode="json") for item in plan.filters],
     }

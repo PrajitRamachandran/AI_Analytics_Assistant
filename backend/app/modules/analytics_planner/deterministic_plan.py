@@ -10,8 +10,9 @@ from typing import Optional
 
 from app.modules.analytics_planner.worksheet_classifier import classify_worksheet
 from app.schemas.analytics_plan import (
-    AverageOperation, CountOperation, GroupByOperation, KPIRecommendation,
-    MetricAggregation, TimeSeriesOperation, VisualizationRecommendation,
+    AverageOperation, CountOperation, GroupByOperation, HistogramOperation,
+    KPIRecommendation, MetricAggregation, ScatterOperation, TimeSeriesOperation,
+    VisualizationRecommendation,
     WorkbookAnalyticsPlan,
 )
 from app.schemas.data_understanding import DatasetProfile, WorksheetProfile
@@ -153,6 +154,40 @@ def build_deterministic_fallback_plan(
             ))
             add_visualization(op_id, f"Trend over time — {sheet.worksheet_name}",
                               "line", "Monthly trend based on valid worksheet dates.")
+
+        # Distribution view: a histogram answers a different question from a
+        # category aggregation and is useful even when the LLM omits it.
+        if metric and len(operations) < _MAX_OPERATIONS:
+            op_id = f"fallback_distribution_{len(operations)+1}"
+            operations.append(HistogramOperation(
+                id=op_id, operation_type="histogram",
+                worksheet_name=sheet.worksheet_name,
+                title=f"Distribution of {metric.replace('_', ' ').title()}",
+                description=f"Frequency distribution of observed {metric.replace('_', ' ')} values.",
+                column=metric, bins=10,
+            ))
+            add_visualization(
+                op_id, f"{metric.replace('_', ' ').title()} Distribution",
+                "histogram", f"Frequency distribution of {metric.replace('_', ' ')} values.",
+            )
+
+        # Exploratory numeric-pair view. This shows paired observations only;
+        # it does not assert correlation or causation.
+        numeric_metrics = metrics[:2]
+        if len(numeric_metrics) == 2 and len(operations) < _MAX_OPERATIONS:
+            op_id = f"fallback_scatter_{len(operations)+1}"
+            operations.append(ScatterOperation(
+                id=op_id, operation_type="scatter",
+                worksheet_name=sheet.worksheet_name,
+                title=f"{numeric_metrics[0]} vs {numeric_metrics[1]}",
+                description="Exploratory view of paired numeric observations; no relationship is inferred.",
+                x_column=numeric_metrics[0], y_column=numeric_metrics[1],
+                sample_limit=1000,
+            ))
+            add_visualization(
+                op_id, f"{numeric_metrics[0]} vs {numeric_metrics[1]}",
+                "scatter", "Paired numeric observations without correlation or causal claims.",
+            )
 
         # One scalar KPI per worksheet when a numeric measure is available.
         if metric and len(operations) < _MAX_OPERATIONS:

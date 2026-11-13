@@ -256,3 +256,54 @@ def test_plan_can_validly_contain_no_operations_for_non_analytical_workbook():
     assert output["results"] == []
     assert output["charts"] == []
     assert output["kpis"][0]["value"] == 2
+
+
+
+def test_inclusive_date_filter_is_applied_before_all_operations():
+    frame = pd.DataFrame({
+        "order_date": pd.to_datetime([
+            "2024-12-31", "2025-01-01", "2025-03-31", "2025-04-01",
+        ]),
+        "revenue": [5, 10, 20, 30],
+    })
+    plan = _plan([{
+        "id": "revenue_total", "operation_type": "sum",
+        "worksheet_name": "Sales", "title": "Revenue in selected period",
+        "description": "Sum revenue inside the selected dates.",
+        "result_name": "total_revenue", "column": "revenue",
+    }])
+    payload = plan.model_dump(mode="python")
+    payload["filters"] = [{
+        "worksheet_name": "Sales", "column": "order_date",
+        "start_date": "2025-01-01", "end_date": "2025-03-31",
+    }]
+    plan = WorkbookAnalyticsPlan.model_validate(payload)
+
+    output = execute_analytics_plan({"Sales": frame}, plan)
+    assert output["results"][0]["value"] == 30
+    assert output["results"][0]["row_count"] == 2
+    assert output["row_count"] == 2
+    assert output["filters_applied"][0]["start_date"] == "2025-01-01"
+
+
+
+def test_targeted_mode_does_not_create_unrequested_default_charts_or_row_kpi():
+    frame = pd.DataFrame({"region": ["North", "South"], "revenue": [10, 20]})
+    plan = _plan([{
+        "id": "revenue_by_region", "operation_type": "group_by",
+        "worksheet_name": "Sales", "title": "Revenue by region",
+        "description": "Sum revenue by region.",
+        "group_by_columns": ["region"],
+        "aggregations": [{
+            "alias": "total_revenue", "function": "sum", "column": "revenue",
+        }],
+    }])
+
+    output = execute_analytics_plan(
+        {"Sales": frame},
+        plan,
+        only_recommended_charts=True,
+        include_default_rows_kpi=False,
+    )
+    assert output["charts"] == []
+    assert output["kpis"] == []

@@ -501,8 +501,8 @@ def test_empty_llm_plan_gets_deterministic_fallback_for_analytical_profile():
     assert result.operations
     assert any(operation.operation_type == "average" for operation in result.operations)
     assert result.kpis
-    # This fixture has no categorical dimension, so no chart is forced.
-    assert result.visualizations == []
+    # A numeric-only worksheet still supports a distribution chart.
+    assert any(item.chart_type == "histogram" for item in result.visualizations)
     assert any("fallback plan" in item.lower() for item in result.limitations)
 
 
@@ -1249,3 +1249,183 @@ def test_planner_produces_a_variety_of_chart_types():
     kinds = {v.chart_type for v in result.visualizations}
     assert len(kinds) >= 3, kinds
     validate_analytical_plan(result, profile)
+
+
+
+def test_user_request_is_included_and_explicitly_disables_generic_analytics():
+    prepared = DatasetProfilePreparer().prepare(make_profile())
+    messages = AnalyticsPromptBuilder().build_messages(
+        prepared,
+        user_request="Show revenue from 2025-01-01 to 2025-03-31.",
+    )
+    assert "Show revenue from 2025-01-01 to 2025-03-31." in messages[1]["content"]
+    assert "ONLY for this request" in messages[1]["content"]
+    assert "Do not add generic" in messages[1]["content"]
+
+
+
+def test_validator_rejects_date_filter_on_non_date_column():
+    plan = make_plan()
+    payload = plan.model_dump(mode="python")
+    payload["filters"] = [{
+        "worksheet_name": "Sales", "column": "revenue",
+        "start_date": "2025-01-01", "end_date": "2025-03-31",
+    }]
+    plan = WorkbookAnalyticsPlan.model_validate(payload)
+    with pytest.raises(AnalyticalPlanValidationError, match="not a date column"):
+        validate_analytical_plan(plan, make_profile())
+
+
+
+def test_targeted_system_prompt_overrides_automatic_dashboard_targets():
+    prompt = AnalyticsPromptBuilder().build_system_prompt(user_request=True)
+    assert "USER-REQUESTED MODE" in prompt
+    assert "there is no minimum chart/operation count" in prompt
+    assert "inclusive" in prompt
+
+
+
+def test_user_request_mode_does_not_apply_automatic_fallback_or_chart_augmentation(monkeypatch):
+    from app.modules.analytics_planner import analytics_planner as planner_module
+
+    class EmptyTargetedGenerator:
+        def generate_plan(self, messages):
+            assert "USER ANALYTICS REQUEST" in messages[1]["content"]
+            return make_plan(operations=[])
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("Automatic fallback must not run in user-requested mode.")
+
+    monkeypatch.setattr(
+        planner_module, "build_deterministic_fallback_plan", unexpected_fallback
+    )
+    monkeypatch.setattr(
+        planner_module, "deterministic_salvage_plan", unexpected_fallback
+    )
+    monkeypatch.setattr(
+        planner_module, "augment_with_deterministic_charts", unexpected_fallback
+    )
+
+    plan = AnalyticsPlanner(
+        plan_generator=EmptyTargetedGenerator()
+    ).generate_plan(make_profile(), user_request="Show me only revenue trends.")
+
+    assert plan.operations == []
+    assert plan.visualizations == []
+
+
+
+def _make_date_profile():
+    return DatasetProfile.model_validate({
+        "filename": "sales.xlsx", "total_worksheet_count": 1,
+        "successful_worksheet_count": 1, "failed_worksheet_count": 0,
+        "worksheets": {"Sales": {
+            "worksheet_name": "Sales", "row_count": 3, "column_count": 2,
+            "columns": [
+                {"column_name": "order_date", "original_name": "Order Date",
+                 "pandas_dtype": "datetime64[ns]", "inferred_type": "date",
+                 "semantic_role": "date", "non_null_count": 3,
+                 "missing_value_count": 0, "blank_string_count": 0,
+                 "missing_percentage": 0, "unique_value_count": 3,
+                 "unique_value_percentage": 100},
+                {"column_name": "revenue", "original_name": "Revenue",
+                 "pandas_dtype": "float64", "inferred_type": "numerical",
+                 "semantic_role": "amount", "non_null_count": 3,
+                 "missing_value_count": 0, "blank_string_count": 0,
+                 "missing_percentage": 0, "unique_value_count": 3,
+                 "unique_value_percentage": 100,
+                 "numerical_statistics": {"minimum": 10, "maximum": 30,
+                    "mean": 20, "median": 20, "total": 60,
+                    "standard_deviation": 10}},
+            ],
+        }},
+    })
+
+
+def _date_group_plan():
+    return WorkbookAnalyticsPlan.model_validate({
+        "plan_version": "1.0", "workbook_summary": "Sales data.",
+        "business_context": {"domain": "sales", "dataset_purpose": "Sales trends", "confidence": 0.8},
+        "worksheet_analyses": [{"worksheet_name": "Sales", "inferred_purpose": "Sales",
+            "summary": "Sales by date.", "analysis_focus": ["Monthly revenue"]}],
+        "operations": [{"id": "monthly_revenue", "operation_type": "group_by",
+            "worksheet_name": "Sales", "title": "Monthly revenue",
+            "description": "Revenue grouped by date.", "group_by_columns": ["order_date"],
+            "aggregations": [{"alias": "total_revenue", "function": "sum", "column": "revenue"}]}],
+        "kpis": [], "visualizations": [{"id": "monthly_chart", "operation_id": "monthly_revenue",
+            "chart_type": "line", "title": "Monthly revenue",
+            "description": "Revenue trend by month.", "priority": "high"}],
+        "key_questions": [], "limitations": [],
+    })
+
+
+def test_explicit_natural_language_date_range_is_enforced_even_if_llm_omits_filter():
+    from app.modules.analytics_planner.analytics_planner import _enforce_explicit_date_filter
+    plan = make_plan(worksheets=[{"worksheet_name": "Sales", "inferred_purpose": "Sales",
+        "summary": "Sales rows.", "analysis_focus": []}])
+    _enforce_explicit_date_filter(
+        plan, _make_date_profile(),
+        "Show total sales from 1 February 2025 to 28 February 2025.",
+    )
+    assert len(plan.filters) == 1
+    assert plan.filters[0].worksheet_name == "Sales"
+    assert plan.filters[0].column == "order_date"
+    assert plan.filters[0].start_date == "2025-02-01"
+    assert plan.filters[0].end_date == "2025-02-28"
+
+
+def test_monthly_date_grouping_is_repaired_to_time_series_before_validation():
+    from app.modules.analytics_planner.analytics_planner import _repair_date_groupings
+    from app.schemas.analytics_plan import TimeSeriesOperation
+    plan = _date_group_plan()
+    _repair_date_groupings(
+        plan, _make_date_profile(),
+        "Show how revenue changes month by month.",
+    )
+    operation = plan.operations[0]
+    assert isinstance(operation, TimeSeriesOperation)
+    assert operation.operation_type == "time_series"
+    assert operation.date_column == "order_date"
+    assert operation.interval == "month"
+
+
+def test_month_year_range_expands_to_full_calendar_months():
+    from app.modules.analytics_planner.analytics_planner import _extract_explicit_date_range
+    assert tuple(value.isoformat() for value in _extract_explicit_date_range(
+        "Analyze sales from January 2025 to February 2025"
+    )) == ("2025-01-01", "2025-02-28")
+
+
+def test_requested_total_scalar_operation_gets_a_linked_kpi():
+    from app.modules.analytics_planner.analytics_planner import _ensure_requested_total_kpis
+    plan = make_plan()
+    _ensure_requested_total_kpis(plan, "Show the total revenue for this period.")
+    assert len(plan.kpis) == 1
+    assert plan.kpis[0].operation_id == "total_revenue"
+    assert plan.kpis[0].label == "Total revenue"
+
+
+def test_full_category_comparison_removes_redundant_top_and_bottom_charts():
+    from app.modules.analytics_planner.analytics_planner import _remove_redundant_extreme_charts
+    plan = WorkbookAnalyticsPlan.model_validate({
+        "plan_version": "1.0", "workbook_summary": "Regional sales.",
+        "business_context": {"domain": "sales", "dataset_purpose": "Compare regions", "confidence": 0.8},
+        "worksheet_analyses": [{"worksheet_name": "Sales", "inferred_purpose": "Sales", "summary": "Regional revenue.", "analysis_focus": []}],
+        "operations": [
+            {"id": "region_all", "operation_type": "group_by", "worksheet_name": "Sales", "title": "Revenue by region", "description": "Compare all regions.", "group_by_columns": ["region"], "aggregations": [{"alias": "total_revenue", "function": "sum", "column": "revenue"}]},
+            {"id": "region_top", "operation_type": "top_n", "worksheet_name": "Sales", "title": "Top region", "description": "Highest region.", "group_by_column": "region", "metric": {"alias": "total_revenue", "function": "sum", "column": "revenue"}, "limit": 1},
+            {"id": "region_bottom", "operation_type": "bottom_n", "worksheet_name": "Sales", "title": "Bottom region", "description": "Lowest region.", "group_by_column": "region", "metric": {"alias": "total_revenue", "function": "sum", "column": "revenue"}, "limit": 1},
+        ],
+        "kpis": [],
+        "visualizations": [
+            {"id": "all_chart", "operation_id": "region_all", "chart_type": "bar", "title": "All regions", "description": "All regions.", "priority": "high"},
+            {"id": "top_chart", "operation_id": "region_top", "chart_type": "bar", "title": "Top region", "description": "Top region.", "priority": "medium"},
+            {"id": "bottom_chart", "operation_id": "region_bottom", "chart_type": "bar", "title": "Bottom region", "description": "Bottom region.", "priority": "medium"},
+        ],
+        "key_questions": [], "limitations": [],
+    })
+    _remove_redundant_extreme_charts(
+        plan, "Compare total revenue across all regions and identify highest and lowest."
+    )
+    assert [operation.id for operation in plan.operations] == ["region_all"]
+    assert [visualization.operation_id for visualization in plan.visualizations] == ["region_all"]

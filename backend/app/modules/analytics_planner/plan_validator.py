@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Any
 
 from app.schemas.analytics_plan import (
@@ -39,6 +40,8 @@ from app.schemas.analytics_plan import (
     SumOperation,
     TimeSeriesOperation,
     TopNOperation,
+    ScatterOperation,
+    HistogramOperation,
     WorkbookAnalyticsPlan,
 )
 
@@ -139,6 +142,7 @@ class AnalyticalPlanValidator:
             )
 
         self._validate_worksheet_analyses(plan)
+        self._validate_filters(plan)
         self._validate_unsupported_currency_claims(plan)
         self._validate_key_questions(plan)
 
@@ -164,6 +168,36 @@ class AnalyticalPlanValidator:
         self._validate_visualizations(plan)
 
         return plan
+
+    def _validate_filters(self, plan: WorkbookAnalyticsPlan) -> None:
+        """Validate user-requested date filters against real worksheet columns."""
+        seen: set[tuple[str, str]] = set()
+        for item in plan.filters:
+            worksheet = self._get_worksheet(item.worksheet_name)
+            column = self._get_column(item.worksheet_name, item.column)
+            if column.inferred_type != "date":
+                raise AnalyticalPlanValidationError(
+                    f"Date filter column '{item.column}' in worksheet "
+                    f"'{item.worksheet_name}' is not a date column."
+                )
+            try:
+                start = date.fromisoformat(item.start_date)
+                end = date.fromisoformat(item.end_date)
+            except ValueError as exc:
+                raise AnalyticalPlanValidationError(
+                    "Date filters must use valid YYYY-MM-DD dates."
+                ) from exc
+            if start > end:
+                raise AnalyticalPlanValidationError(
+                    "Date filter start_date must be on or before end_date."
+                )
+            key = (item.worksheet_name, item.column)
+            if key in seen:
+                raise AnalyticalPlanValidationError(
+                    f"Duplicate date filter for '{item.column}' in "
+                    f"worksheet '{item.worksheet_name}'."
+                )
+            seen.add(key)
 
     # ========================================================
     # FREE-TEXT GROUNDING GUARDS
@@ -720,6 +754,28 @@ class AnalyticalPlanValidator:
 
             self._validate_comparison(operation)
 
+        elif isinstance(operation, HistogramOperation):
+            self._validate_column_type(
+                worksheet_name=operation.worksheet_name,
+                column_name=operation.column,
+                allowed_types=NUMERICAL_TYPES,
+                operation_name="histogram",
+            )
+
+        elif isinstance(operation, ScatterOperation):
+            self._validate_column_type(
+                worksheet_name=operation.worksheet_name,
+                column_name=operation.x_column,
+                allowed_types=NUMERICAL_TYPES,
+                operation_name="scatter",
+            )
+            self._validate_column_type(
+                worksheet_name=operation.worksheet_name,
+                column_name=operation.y_column,
+                allowed_types=NUMERICAL_TYPES,
+                operation_name="scatter",
+            )
+
         else:
 
             raise AnalyticalPlanValidationError(
@@ -848,14 +904,18 @@ class AnalyticalPlanValidator:
             operation_type = operation.operation_type
 
             if chart_type == "scatter":
+                if operation_type != "scatter":
+                    raise AnalyticalPlanValidationError(
+                        f"Scatter chart '{visualization.id}' requires a scatter operation."
+                    )
 
-                raise AnalyticalPlanValidationError(
-                    "Scatter charts are not supported in V1 because "
-                    "the current operation contract does not define "
-                    "a dedicated scatter-data operation."
-                )
+            elif chart_type == "histogram":
+                if operation_type != "histogram":
+                    raise AnalyticalPlanValidationError(
+                        f"Histogram '{visualization.id}' requires a histogram operation."
+                    )
 
-            if chart_type in {"line", "area"}:
+            elif chart_type in {"line", "area"}:
 
                 if operation_type != "time_series":
 

@@ -44,6 +44,8 @@ _CHARTS_BY_OPERATION: dict[str, tuple[str, ...]] = {
     "comparison": ("bar", "table"),
     "percentage_of_total": ("bar", "pie", "donut", "table"),
     "time_series": ("line", "area", "table"),
+    "scatter": ("scatter",),
+    "histogram": ("histogram", "table"),
 }
 
 MAX_OPERATIONS = 12
@@ -172,6 +174,12 @@ def _recommend_chart_type(
     """
     kind = operation.operation_type
 
+    if kind == "histogram":
+        return "histogram"
+
+    if kind == "scatter":
+        return "scatter"
+
     if kind == "time_series":
         function = operation.metric.function
         # Cumulative-looking totals read well as areas; rates and averages as lines.
@@ -236,7 +244,9 @@ def _repair_visualizations(
         if visualization.id in seen_ids:
             continue
 
-        allowed = _CHARTS_BY_OPERATION[operation.operation_type]
+        allowed = _CHARTS_BY_OPERATION.get(operation.operation_type)
+        if not allowed:
+            continue
         if visualization.chart_type not in allowed:
             visualization.chart_type = allowed[0]
 

@@ -122,8 +122,12 @@ def test_analytics_endpoint_returns_plan_execution_and_chart_data(tmp_path, monk
     workbook_path = dataset_dir / "workbook.xlsx"
     workbook_path.write_bytes(b"placeholder")
 
-    connection = FakeConnection(("sales.xlsx", str(workbook_path), "processed"))
+    connection = FakeConnection(("sales.xlsx", str(workbook_path), "processed", None, None))
     monkeypatch.setattr(analytics_api, "UPLOAD_DIR", upload_root)
+    monkeypatch.setattr(analytics_api, "ensure_state_schema", lambda: None)
+    monkeypatch.setattr(analytics_api, "save_dataset_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(analytics_api, "load_processing_artifact", lambda dataset_id: None)
+    monkeypatch.setattr(analytics_api, "get_selected_model", lambda: {"provider": "ollama", "model": "test-model"})
     monkeypatch.setattr(analytics_api, "get_db_connection", lambda: connection)
     monkeypatch.setattr(
         analytics_api, "process_workbook",
@@ -139,7 +143,10 @@ def test_analytics_endpoint_returns_plan_execution_and_chart_data(tmp_path, monk
     monkeypatch.setattr(analytics_api, "profile_dataset", lambda cleaning: _profile())
 
     class FakePlanner:
-        def generate_plan(self, profile):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def generate_plan(self, profile, user_request=None):
             assert profile.filename == "sales.xlsx"
             return _plan()
 
@@ -156,9 +163,10 @@ def test_analytics_endpoint_returns_plan_execution_and_chart_data(tmp_path, monk
 
 
 def test_analytics_endpoint_rejects_unprocessed_dataset(monkeypatch):
+    monkeypatch.setattr(analytics_api, "ensure_state_schema", lambda: None)
     monkeypatch.setattr(
         analytics_api, "get_db_connection",
-        lambda: FakeConnection(("sales.xlsx", "/unused/workbook.xlsx", "uploaded")),
+        lambda: FakeConnection(("sales.xlsx", "/unused/workbook.xlsx", "uploaded", None, None)),
     )
     with pytest.raises(analytics_api.HTTPException) as error:
         analytics_api.generate_dataset_analytics("dataset-1")
@@ -187,10 +195,14 @@ def test_analytics_endpoint_returns_gateway_timeout_for_slow_ollama(tmp_path, mo
     workbook_path.write_bytes(b"placeholder")
 
     monkeypatch.setattr(analytics_api, "UPLOAD_DIR", upload_root)
+    monkeypatch.setattr(analytics_api, "ensure_state_schema", lambda: None)
+    monkeypatch.setattr(analytics_api, "save_dataset_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(analytics_api, "load_processing_artifact", lambda dataset_id: None)
+    monkeypatch.setattr(analytics_api, "get_selected_model", lambda: {"provider": "ollama", "model": "test-model"})
     monkeypatch.setattr(
         analytics_api,
         "get_db_connection",
-        lambda: FakeConnection(("sales.xlsx", str(workbook_path), "processed")),
+        lambda: FakeConnection(("sales.xlsx", str(workbook_path), "processed", None, None)),
     )
     monkeypatch.setattr(
         analytics_api,
@@ -202,7 +214,10 @@ def test_analytics_endpoint_returns_gateway_timeout_for_slow_ollama(tmp_path, mo
     monkeypatch.setattr(analytics_api, "profile_dataset", lambda cleaning: _profile())
 
     class SlowPlanner:
-        def generate_plan(self, profile):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def generate_plan(self, profile, user_request=None):
             raise AnalyticsPlanningTimeoutError("Ollama inference timed out.")
 
     monkeypatch.setattr(analytics_api, "AnalyticsPlanner", SlowPlanner)
@@ -221,10 +236,14 @@ def test_analytics_endpoint_excludes_reference_sheet_from_analyzed_row_count(tmp
     workbook_path.write_bytes(b"placeholder")
 
     monkeypatch.setattr(analytics_api, "UPLOAD_DIR", upload_root)
+    monkeypatch.setattr(analytics_api, "ensure_state_schema", lambda: None)
+    monkeypatch.setattr(analytics_api, "save_dataset_stage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(analytics_api, "load_processing_artifact", lambda dataset_id: None)
+    monkeypatch.setattr(analytics_api, "get_selected_model", lambda: {"provider": "ollama", "model": "test-model"})
     monkeypatch.setattr(
         analytics_api,
         "get_db_connection",
-        lambda: FakeConnection(("sales.xlsx", str(workbook_path), "processed")),
+        lambda: FakeConnection(("sales.xlsx", str(workbook_path), "processed", None, None)),
     )
     monkeypatch.setattr(
         analytics_api,
@@ -268,7 +287,10 @@ def test_analytics_endpoint_excludes_reference_sheet_from_analyzed_row_count(tmp
     )
 
     class FakePlanner:
-        def generate_plan(self, profile):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def generate_plan(self, profile, user_request=None):
             return _plan()
 
     monkeypatch.setattr(analytics_api, "AnalyticsPlanner", FakePlanner)
